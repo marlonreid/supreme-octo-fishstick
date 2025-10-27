@@ -1,0 +1,79 @@
+Project Overview
+
+What is the project’s name, primary purpose, and main maintainers?
+
+Where is the source code hosted (e.g., GitHub, GitLab, self-hosted repo)?
+
+What license governs the project?
+
+Is there a published release roadmap and/or lifecycle policy?
+
+Governance + Community
+
+How many active maintainers/reviewers contribute to the project?
+
+Are maintainers identifiable (not anonymous)?
+
+Is there a contributor vetting process (e.g., approval to merge code)?
+
+Are changes peer-reviewed before merging? (Describe review policy.)
+
+Secure Development Practices
+
+Is there a documented code contribution guideline or developer policy?
+
+Is automated testing performed on contributions?
+
+Are static/dynamic security analysis tools used (e.g., CodeQL, SAST)?
+
+Are dependencies scanned for CVEs? How frequently?
+
+Does the project follow secure coding standards or checklists?
+
+Release Integrity
+
+Are releases cryptographically signed (e.g., GPG, Sigstore)?
+
+Does the project maintain a changelog with security-relevant notes?
+
+How is dependency integrity verified (e.g., lock files, SBOM)?
+
+Vulnerability Management
+
+Is there a Security.md or documented disclosure process?
+
+How can researchers privately report vulnerabilities? (e.g., email, GitHub advisory program)
+
+What is the typical response time to security-related issues?
+
+Is there a vulnerability history available? (public advisories, CVE references)
+
+Infrastructure + Access Controls
+
+Who has admin access to the repositories & release systems?
+
+Are maintainers using MFA on repo hosting services?
+
+How are secrets handled (e.g., tokens in CI/CD)?
+
+Does the project protect against supply chain attacks? (e.g., branch protection rules, reproducible builds)
+
+Documentation & Transparency
+
+Is security documentation maintained and version-controlled?
+
+Is there user guidance around secure deployment?
+
+Are known risks/limitations documented?
+
+Legal & Licensing Health
+
+Are third-party dependencies properly licensed and documented?
+
+Are there contribution agreements in place (e.g., CLA or DCO)?
+
+Support & Longevity
+
+Is the project actively maintained? (last release date, commit history)
+
+Is there a defined support channel for security issues?
