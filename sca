@@ -1,0 +1,133 @@
+package com.example.keycloak.shortcode;
+
+import org.keycloak.authentication.AuthenticationFlowContext;
+import org.keycloak.authentication.Authenticator;
+import org.keycloak.authentication.AuthenticationFlowError;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.UserModel;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.services.managers.AuthenticationManager;
+import org.keycloak.util.Time;
+
+import jakarta.ws.rs.core.Response;
+import java.util.List;
+
+/**
+ * Authenticator that accepts a short code (stored as user attribute "exam_code").
+ * Attribute names used:
+ *  - exam_code
+ *  - exam_code_expires  (epoch seconds)
+ *  - exam_code_used     ("true" or absent)
+ */
+public class ShortCodeAuthenticator implements Authenticator {
+
+    public static final String ATTR_CODE = "exam_code";
+    public static final String ATTR_EXPIRES = "exam_code_expires";
+    public static final String ATTR_USED = "exam_code_used";
+
+    private final KeycloakSession session;
+
+    public ShortCodeAuthenticator(KeycloakSession session) {
+        this.session = session;
+    }
+
+    @Override
+    public void authenticate(AuthenticationFlowContext context) {
+        Response challenge = context.form()
+            .setAttribute("message", "")
+            .createForm("short-code-login.ftl");
+        context.challenge(challenge);
+    }
+
+    @Override
+    public void action(AuthenticationFlowContext context) {
+        String code = context.getHttpRequest().getDecodedFormParameters().getFirst("code");
+        if (code == null || code.trim().isEmpty()) {
+            Response challenge = context.form()
+                .setAttribute("message", "Please enter the code.")
+                .createForm("short-code-login.ftl");
+            context.challenge(challenge);
+            return;
+        }
+        code = code.trim();
+
+        RealmModel realm = context.getRealm();
+
+        // find users with matching attribute
+        List<UserModel> results = session.users().searchForUserByUserAttribute(realm, ATTR_CODE, code);
+        if (results == null || results.isEmpty()) {
+            Response challenge = context.form()
+                .setAttribute("message", "Invalid or expired code.")
+                .createForm("short-code-login.ftl");
+            context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, challenge);
+            return;
+        }
+
+        UserModel user = results.get(0); // take first match
+
+        // check if used
+        String usedAttr = user.getFirstAttribute(ATTR_USED);
+        if ("true".equalsIgnoreCase(usedAttr)) {
+            Response challenge = context.form()
+                .setAttribute("message", "This code has already been used.")
+                .createForm("short-code-login.ftl");
+            context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, challenge);
+            return;
+        }
+
+        // check expiry
+        String expiresAttr = user.getFirstAttribute(ATTR_EXPIRES);
+        long now = Time.currentTimeMillis() / 1000L;
+        if (expiresAttr == null) {
+            Response challenge = context.form()
+                .setAttribute("message", "Invalid code.")
+                .createForm("short-code-login.ftl");
+            context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, challenge);
+            return;
+        }
+        long expires;
+        try {
+            expires = Long.parseLong(expiresAttr);
+        } catch (NumberFormatException e) {
+            Response challenge = context.form()
+                .setAttribute("message", "Invalid code (bad expiry).")
+                .createForm("short-code-login.ftl");
+            context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, challenge);
+            return;
+        }
+        if (now > expires) {
+            Response challenge = context.form()
+                .setAttribute("message", "This code has expired.")
+                .createForm("short-code-login.ftl");
+            context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, challenge);
+            return;
+        }
+
+        // mark used immediately to avoid race conditions
+        user.setSingleAttribute(ATTR_USED, "true");
+
+        // set the user into the context and signal success
+        context.setUser(user);
+        context.success();
+    }
+
+    @Override
+    public boolean requiresUser() {
+        return false;
+    }
+
+    @Override
+    public boolean configuredFor(org.keycloak.models.KeycloakSession session, RealmModel realm, UserModel user) {
+        return true;
+    }
+
+    @Override
+    public void setRequiredActions(org.keycloak.models.KeycloakSession session, RealmModel realm, UserModel user) {
+        // no required actions
+    }
+
+    @Override
+    public void close() {
+        // nothing to close
+    }
+}
