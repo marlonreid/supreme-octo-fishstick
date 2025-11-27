@@ -3,14 +3,12 @@ package com.example.keycloak.shortcode;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.Authenticator;
 import org.keycloak.authentication.AuthenticationFlowError;
+import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.services.managers.AuthenticationManager;
-import org.keycloak.util.Time;
 
 import jakarta.ws.rs.core.Response;
-import java.util.List;
+import java.util.Optional;
 
 /**
  * Authenticator that accepts a short code (stored as user attribute "exam_code").
@@ -53,9 +51,12 @@ public class ShortCodeAuthenticator implements Authenticator {
 
         RealmModel realm = context.getRealm();
 
-        // find users with matching attribute
-        List<UserModel> results = session.users().searchForUserByUserAttribute(realm, ATTR_CODE, code);
-        if (results == null || results.isEmpty()) {
+        // Use the stream variant (Keycloak 24+/26.x)
+        Optional<UserModel> optUser = session.users()
+            .searchForUserByUserAttributeStream(realm, ATTR_CODE, code)
+            .findFirst();
+
+        if (optUser.isEmpty()) {
             Response challenge = context.form()
                 .setAttribute("message", "Invalid or expired code.")
                 .createForm("short-code-login.ftl");
@@ -63,7 +64,7 @@ public class ShortCodeAuthenticator implements Authenticator {
             return;
         }
 
-        UserModel user = results.get(0); // take first match
+        UserModel user = optUser.get();
 
         // check if used
         String usedAttr = user.getFirstAttribute(ATTR_USED);
@@ -77,7 +78,7 @@ public class ShortCodeAuthenticator implements Authenticator {
 
         // check expiry
         String expiresAttr = user.getFirstAttribute(ATTR_EXPIRES);
-        long now = Time.currentTimeMillis() / 1000L;
+        long now = System.currentTimeMillis() / 1000L;
         if (expiresAttr == null) {
             Response challenge = context.form()
                 .setAttribute("message", "Invalid code.")
@@ -103,7 +104,7 @@ public class ShortCodeAuthenticator implements Authenticator {
             return;
         }
 
-        // mark used immediately to avoid race conditions
+        // mark used immediately to avoid race conditions (persisted by Keycloak user model)
         user.setSingleAttribute(ATTR_USED, "true");
 
         // set the user into the context and signal success
@@ -117,12 +118,12 @@ public class ShortCodeAuthenticator implements Authenticator {
     }
 
     @Override
-    public boolean configuredFor(org.keycloak.models.KeycloakSession session, RealmModel realm, UserModel user) {
+    public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
         return true;
     }
 
     @Override
-    public void setRequiredActions(org.keycloak.models.KeycloakSession session, RealmModel realm, UserModel user) {
+    public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
         // no required actions
     }
 
