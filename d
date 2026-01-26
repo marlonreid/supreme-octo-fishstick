@@ -1,44 +1,73 @@
-DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup';
+DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup'; -- Format: Schema.ProcName
 
 WITH FormalTree AS (
-    -- ANCHOR: Direct Dependencies
--- ANCHOR: Direct Dependencies
+    -- =============================================
+    -- 1. ANCHOR: Direct Dependencies (Level 1)
+    -- =============================================
     SELECT 
         sed.referencing_id,
         sed.referenced_id,
-        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(MAX)) AS SourceName,
-        -- FIXED: Handle NULL Schemas
-        CAST(ISNULL(sed.referenced_schema_name, '???') + '.' + ISNULL(sed.referenced_entity_name, '???') AS NVARCHAR(MAX)) AS TargetName,
+        
+        -- Safe Source Name
+        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) 
+             AS NVARCHAR(MAX)) AS SourceName,
+
+        -- Safe Target Name (Handles missing schemas for broken objects)
+        CAST(
+            ISNULL(sed.referenced_schema_name, '???') + '.' + ISNULL(sed.referenced_entity_name, '???') 
+            AS NVARCHAR(MAX)
+        ) AS TargetName,
+        
         1 AS Level,
-        CAST('/' + CAST(sed.referencing_id AS VARCHAR(MAX)) + '/' + CAST(sed.referenced_id AS VARCHAR(MAX)) + '/' AS VARCHAR(MAX)) AS Path
+        
+        -- Path Tracking for Cycle Detection
+        CAST('/' + CAST(sed.referencing_id AS VARCHAR(MAX)) + '/' + 
+             ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/' 
+             AS VARCHAR(MAX)) AS Path
+
     FROM sys.sql_expression_dependencies sed
     WHERE sed.referencing_id = OBJECT_ID(@TargetObjectName)
 
     UNION ALL
 
-    -- RECURSIVE: What do those dependencies call?
+    -- =============================================
+    -- 2. RECURSIVE MEMBER: Indirect Dependencies (Level 2+)
+    -- =============================================
     SELECT 
         sed.referencing_id,
         sed.referenced_id,
-        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(MAX)),
-        CAST(sed.referenced_schema_name + '.' + sed.referenced_entity_name AS NVARCHAR(MAX)),
+        
+        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) 
+             AS NVARCHAR(MAX)),
+
+        CAST(
+            ISNULL(sed.referenced_schema_name, '???') + '.' + ISNULL(sed.referenced_entity_name, '???') 
+            AS NVARCHAR(MAX)
+        ),
+        
         t.Level + 1,
-        CAST(t.Path + CAST(sed.referenced_id AS VARCHAR(MAX)) + '/' AS VARCHAR(MAX))
+        
+        -- Update Path
+        CAST(t.Path + ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/' AS VARCHAR(MAX))
+
     FROM sys.sql_expression_dependencies sed
     INNER JOIN FormalTree t ON sed.referencing_id = t.referenced_id
     WHERE sed.referenced_entity_name IS NOT NULL
-      -- STOP if we have seen this ID before in the current chain
-      AND t.Path NOT LIKE '%/' + CAST(sed.referenced_id AS VARCHAR(MAX)) + '/%'
+      -- STOP if we have seen this ID before in the current chain (Cycle Check)
+      AND t.Path NOT LIKE '%/' + ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/%'
 )
+
+-- =============================================
+-- 3. FINAL OUTPUT
+-- =============================================
 SELECT DISTINCT 
     SourceName, 
     TargetName, 
     Level, 
     'FORMAL' AS Method
 FROM FormalTree
-ORDER BY Level
-OPTION (MAXRECURSION 300); -- Bump limit slightly, but the Path logic handles the loops
-
+ORDER BY Level, TargetName
+OPTION (MAXRECURSION 300);
 
 
 -------------------------------------
