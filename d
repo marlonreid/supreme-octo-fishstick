@@ -13,3 +13,10 @@ WHERE
     referencing_obj.type IN ('P', 'FN', 'IF', 'TF') -- Procs and various Function types
     AND sed.referenced_entity_name IS NOT NULL
 ORDER BY [SourceObjectName], [ReferencedEntityName];
+
+
+
+SELECT name, type_desc 
+FROM sys.procedures p
+JOIN sys.sql_modules m ON p.object_id = m.object_id
+WHERE m.definition LIKE '%EXEC(%' OR m.definition LIKE '%sp_executesql%';
