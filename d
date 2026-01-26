@@ -7,7 +7,9 @@ WITH FormalTree AS (
         sed.referenced_id,
         CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(MAX)) AS SourceName,
         CAST(sed.referenced_schema_name + '.' + sed.referenced_entity_name AS NVARCHAR(MAX)) AS TargetName,
-        1 AS Level
+        1 AS Level,
+        -- Track the path: "/SourceID/TargetID/"
+        CAST('/' + CAST(sed.referencing_id AS VARCHAR(MAX)) + '/' + CAST(sed.referenced_id AS VARCHAR(MAX)) + '/' AS VARCHAR(MAX)) AS Path
     FROM sys.sql_expression_dependencies sed
     WHERE sed.referencing_id = OBJECT_ID(@TargetObjectName)
 
@@ -19,15 +21,22 @@ WITH FormalTree AS (
         sed.referenced_id,
         CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(MAX)),
         CAST(sed.referenced_schema_name + '.' + sed.referenced_entity_name AS NVARCHAR(MAX)),
-        t.Level + 1
+        t.Level + 1,
+        CAST(t.Path + CAST(sed.referenced_id AS VARCHAR(MAX)) + '/' AS VARCHAR(MAX))
     FROM sys.sql_expression_dependencies sed
     INNER JOIN FormalTree t ON sed.referencing_id = t.referenced_id
     WHERE sed.referenced_entity_name IS NOT NULL
+      -- STOP if we have seen this ID before in the current chain
+      AND t.Path NOT LIKE '%/' + CAST(sed.referenced_id AS VARCHAR(MAX)) + '/%'
 )
-SELECT DISTINCT SourceName, TargetName, Level, 'FORMAL' AS Method
+SELECT DISTINCT 
+    SourceName, 
+    TargetName, 
+    Level, 
+    'FORMAL' AS Method
 FROM FormalTree
-ORDER BY Level;
-
+ORDER BY Level
+OPTION (MAXRECURSION 300); -- Bump limit slightly, but the Path logic handles the loops
 
 
 
