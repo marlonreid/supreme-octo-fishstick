@@ -1,51 +1,117 @@
-flowchart TD
-    A[Proposed API change] --> B{Is there a breaking change<br/>(removal, rename, behavior change,<br/>status codes, media type, required fields)?}
-    B -- Yes --> C{Can you avoid breakage via<br/>backward-compatible techniques?}
-    C -->|Additive only (new fields/ops)| D[Ship in current version (minor)]
-    C -->|Defaulting / tolerant readers| D
-    C -->|Feature flags / query params| D
-    C -->|Content negotiation (e.g., new media type)| D
-    C -->|No, unavoidable break| E[Consider NEW MAJOR VERSION]
-    B -- No --> F{Is the change purely<br/>non-functional (docs, bugfix<br/>without contract change)?}
-    F -- Yes --> G[Ship as patch in current version]
-    F -- No --> H{Is it additive (new endpoint/field,<br/>optional param, new error code value<br/>with old still valid)?}
-    H -- Yes --> D
-    H -- No --> E
+# =========================================================
+# CONFIGURATION
+# =========================================================
+$VaultRoot = "C:\Obsidian\MyVault\AI"  # Change this to your vault path
+$CsvPath_Formal = ".\formal.csv"       # Output from Script 1
+$CsvPath_Dynamic = ".\dynamic.csv"     # Output from Script 3 (Text Scan)
+$CsvPath_Chars = ".\characteristics.csv" # Output from Script 2 (Flags)
 
-    %% Cross-cutting concerns gate
-    E --> CC{Cross-cutting concerns impacted?}
-    D --> CC
-    CC -->|Auth/Scopes/Permissions| I[Prefer NEW MAJOR VERSION or<br/>separate auth scheme]
-    CC -->|Error model / envelope / pagination / sorting| I
-    CC -->|Versioning strategy / URL or header| I
-    CC -->|Idempotency / retries / rate limits semantics| I
-    CC -->|Security & Compliance (PII fields, retention,<br/>geo, legal, audit)| I
-    CC -->|Performance/SLA changes visible to clients| I
-    CC -->|Event schemas / webhooks / async contracts| I
-    CC -->|Deprecation headers & sunset policy readiness| I
-    CC -->|SDKs & client compatibility plan| I
-    CC -->|No material cross-cutting impact| J[Proceed per path (D or E)]
+# Folder Mapping: SQL Type -> Obsidian Folder Name
+$TypeMap = @{
+    "SQL_STORED_PROCEDURE" = "stored procedures"
+    "USER_TABLE"           = "tables"
+    "SQL_SCALAR_FUNCTION"  = "functions"
+    "SQL_TABLE_VALUED_FUNCTION" = "functions"
+    "VIEW"                 = "views"
+    "CHARACTERISTIC"       = "characteristics"
+}
 
-    %% Additional checks before final decision
-    D --> K{Do clients need a preview?<br/>(uncertain semantics / experimental)}
-    K -- Yes --> L[Expose as preview/beta via header or version param]
-    K -- No --> M[Release in current version]
+# =========================================================
+# 1. LOAD AND PREPARE DATA
+# =========================================================
+Write-Host "Reading CSV files..." -ForegroundColor Cyan
 
-    I --> N{Can impact be isolated?}
-    N -- Yes --> O[Introduce parallel surface (e.g., /v2 or new media type)]
-    N -- No --> P[NEW MAJOR VERSION with migration plan]
+$Dependencies = @()
 
-    %% Final gates
-    M --> Q{Have you updated versioning docs,<br/>changelog, and contract tests?}
-    O --> Q
-    P --> Q
-    Q -- Yes --> R[✅ Ready to release]
-    Q -- No --> S[🛑 Block: complete docs/tests/tooling]
+# Import Formal (Expects: SourceName, TargetName, SourceType, TargetType)
+if (Test-Path $CsvPath_Formal) { 
+    $Dependencies += Import-Csv $CsvPath_Formal | Select-Object *, @{N='Origin';E={'Formal'}} 
+}
 
-    %% Notes
-    subgraph Legend
-      direction TB
-      L1[Minor/Patch: backward compatible]
-      L2[Major: breaking or cross-cutting shift]
-      L3[Preview: gated/opt-in]
-    end
+# Import Dynamic (Expects: SourceName, TargetName) - We assume SourceType is Proc
+if (Test-Path $CsvPath_Dynamic) {
+    $Dependencies += Import-Csv $CsvPath_Dynamic | Select-Object *, @{N='Origin';E={'Dynamic'}} 
+}
+
+# Import Characteristics (Expects: SourceName, TargetName)
+if (Test-Path $CsvPath_Chars) {
+    $Dependencies += Import-Csv $CsvPath_Chars | Select-Object *, @{N='Origin';E={'Characteristic'}} 
+}
+
+# Group by the Source Object (The file we are creating)
+$FilesToCreate = $Dependencies | Group-Object SourceName
+
+# =========================================================
+# 2. GENERATE MARKDOWN FILES
+# =========================================================
+foreach ($File in $FilesToCreate) {
+    $ObjectName = $File.Name
+    
+    # Determine Object Type (Take the first non-null type found for this object)
+    $RawType = $File.Group | Where-Object { $_.SourceObjectType -ne $null } | Select-Object -ExpandProperty SourceObjectType -First 1
+    if (-not $RawType) { $RawType = "SQL_STORED_PROCEDURE" } # Default fallback
+    
+    # Map to Folder Name
+    $Folder = $TypeMap[$RawType]
+    if (-not $Folder) { $Folder = "others" }
+    
+    # Create Directory if missing
+    $FullFolderPath = Join-Path $VaultRoot $Folder
+    if (-not (Test-Path $FullFolderPath)) { New-Item -ItemType Directory -Force -Path $FullFolderPath | Out-Null }
+
+    # Build the 'down' list (Dependencies)
+    $DownList = @()
+    
+    # Process Formal/Dynamic Links
+    foreach ($Row in $File.Group) {
+        if (-not [string]::IsNullOrWhiteSpace($Row.TargetName)) {
+            # Format: "[[schema.Object]]"
+            # We use distinct to avoid duplicates if found in multiple scripts
+            $Link = '"[[{0}]]"' -f $Row.TargetName
+            if ($DownList -notcontains $Link) {
+                $DownList += $Link
+            }
+        }
+    }
+
+    # =========================================================
+    # 3. CONSTRUCT FILE CONTENT
+    # =========================================================
+    $Content = @()
+    $Content += "---"
+    
+    # Property: Type (Clean up 'SQL_' prefix for readability if desired, or use raw)
+    $CleanType = $Folder -replace "s$", "" # e.g. "tables" -> "table"
+    $Content += "type: $CleanType"
+    
+    # Property: Down (Direct Dependencies)
+    if ($DownList.Count -gt 0) {
+        $Content += "down:"
+        foreach ($Link in $DownList) {
+            $Content += "  - $Link"
+        }
+    } else {
+        $Content += "down: []"
+    }
+    
+    $Content += "---"
+    $Content += ""
+    $Content += "### Description"
+    $Content += "*(Auto-generated placeholder)*"
+    $Content += ""
+    $Content += "```dataviewjs"
+    $Content += 'await dv.view("_scripts/dependencies")'
+    $Content += "```"
+
+    # =========================================================
+    # 4. WRITE FILE
+    # =========================================================
+    # Sanitize Filename (Just in case)
+    $SafeName = $ObjectName -replace '[\\/*?:"<>|]', '_'
+    $FilePath = Join-Path $FullFolderPath "$SafeName.md"
+    
+    Set-Content -Path $FilePath -Value ($Content -join "`n") -Encoding UTF8
+    Write-Host "Created: $Folder\$SafeName.md" -ForegroundColor Green
+}
+
+Write-Host "Done! Vault updated." -ForegroundColor Cyan
