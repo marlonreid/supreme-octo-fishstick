@@ -1,116 +1,60 @@
-# =========================================================
-# CONFIGURATION
-# =========================================================
-# The Vault Root is ONE LEVEL UP from where this script runs
-$VaultRoot = Resolve-Path ".." 
+DECLARE @TargetProc NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup'; -- Format: Schema.ProcName
 
-# Map SQL Types to Obsidian Folder Names
-$TypeMap = @{
-    "SQL_STORED_PROCEDURE"      = "stored procedures"
-    "USER_TABLE"                = "tables"
-    "SQL_SCALAR_FUNCTION"       = "functions"
-    "SQL_TABLE_VALUED_FUNCTION" = "functions"
-    "VIEW"                      = "views"
-    "CHARACTERISTIC"            = "characteristics"
-}
-
-# =========================================================
-# 1. PROCESS FOLDERS
-# =========================================================
-$DataFolders = Get-ChildItem -Directory
-
-Write-Host "Found $($DataFolders.Count) object folders. Processing..." -ForegroundColor Cyan
-
-foreach ($Folder in $DataFolders) {
-    $ProcName = $Folder.Name
+-- =============================================
+-- 1. FORMAL DEPENDENCIES
+-- C# Index: 0=Source, 1=SourceType, 2=Target, 3=TargetType, 4=RowType
+-- =============================================
+SELECT 
+    -- [0] SourceName
+    OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS SourceName,
     
-    # Paths to the CSVs inside the current Proc's folder
-    $CsvPath_Formal  = Join-Path $Folder.FullName "formal.csv"
-    $CsvPath_Dynamic = Join-Path $Folder.FullName "dynamic.csv"
-    $CsvPath_Chars   = Join-Path $Folder.FullName "characteristics.csv"
-
-    $DownList = @()
-    $ObjectType = "SQL_STORED_PROCEDURE" # Default
-
-    # --- 1A. Process FORMAL CSV ---
-    if (Test-Path $CsvPath_Formal) {
-        $Data = Import-Csv $CsvPath_Formal
-        foreach ($Row in $Data) {
-            # Capture Object Type from the first row that defines the source
-            if ($Row.Level -eq "1" -and $Row.SourceName -eq $ProcName -and $Row.SourceObjectType) {
-                $ObjectType = $Row.SourceObjectType
-            }
-            
-            # Add Direct Dependencies (Level 1)
-            if ($Row.Level -eq "1" -and !([string]::IsNullOrWhiteSpace($Row.TargetName))) {
-                $Link = '"[[{0}]]"' -f $Row.TargetName
-                if ($DownList -notcontains $Link) { $DownList += $Link }
-            }
-        }
-    }
-
-    # --- 1B. Process DYNAMIC CSV ---
-    if (Test-Path $CsvPath_Dynamic) {
-        $Data = Import-Csv $CsvPath_Dynamic
-        foreach ($Row in $Data) {
-            if (!([string]::IsNullOrWhiteSpace($Row.TargetName))) {
-                $Link = '"[[{0}]]"' -f $Row.TargetName
-                if ($DownList -notcontains $Link) { $DownList += $Link }
-            }
-        }
-    }
-
-    # --- 1C. Process CHARACTERISTICS CSV ---
-    if (Test-Path $CsvPath_Chars) {
-        $Data = Import-Csv $CsvPath_Chars
-        foreach ($Row in $Data) {
-            if (!([string]::IsNullOrWhiteSpace($Row.TargetName))) {
-                $Link = '"[[{0}]]"' -f $Row.TargetName
-                if ($DownList -notcontains $Link) { $DownList += $Link }
-            }
-        }
-    }
-
-    # =========================================================
-    # 2. FILE CREATION
-    # =========================================================
+    -- [1] SourceObjectType
+    'SQL_STORED_PROCEDURE' AS SourceObjectType,
     
-    # Determine Target Folder based on Type
-    $TargetFolder = $TypeMap[$ObjectType]
-    if (-not $TargetFolder) { $TargetFolder = "others" }
+    -- [2] TargetName (The Dependency)
+    ISNULL(sed.referenced_schema_name, '???') + '.' + ISNULL(sed.referenced_entity_name, '???') AS TargetName,
     
-    # Ensure Folder Exists in Parent Root
-    $FullFolderPath = Join-Path $VaultRoot $TargetFolder
-    if (-not (Test-Path $FullFolderPath)) { 
-        New-Item -ItemType Directory -Force -Path $FullFolderPath | Out-Null 
-    }
+    -- [3] TargetType (e.g., USER_TABLE)
+    ISNULL(obj.type_desc, 'BROKEN_REF') AS TargetType,
+    
+    -- [4] RowType
+    'DEPENDENCY' AS RowType 
+FROM sys.sql_expression_dependencies sed
+LEFT JOIN sys.objects obj ON sed.referenced_id = obj.object_id
+WHERE sed.referencing_id = OBJECT_ID(@TargetProc)
 
-    # Build File Content
-    $CleanType = $TargetFolder.TrimEnd('s') # e.g. "tables" -> "table"
-    
-    $Content = @()
-    $Content += "---"
-    $Content += "type: $CleanType"
-    
-    if ($DownList.Count -gt 0) {
-        $Content += "down:"
-        $SortedLinks = $DownList | Sort-Object
-        foreach ($Link in $SortedLinks) {
-            $Content += "  - $Link"
-        }
-    } else {
-        $Content += "down: []"
-    }
-    
-    $Content += "---"
-    $Content += ""
-    $Content += "```dataviewjs"
-    $Content += 'await dv.view("_scripts/dependencies")'
-    $Content += "```"
+UNION ALL
 
-    # Write File - Assuming ProcName is a valid filename
-    $FilePath = Join-Path $FullFolderPath "$ProcName.md"
+-- =============================================
+-- 2. INPUT PARAMETERS
+-- =============================================
+SELECT 
+    -- [0] SourceName
+    OBJECT_SCHEMA_NAME(p.object_id) + '.' + OBJECT_NAME(p.object_id) AS SourceName,
     
-    Set-Content -Path $FilePath -Value ($Content -join "`n") -Encoding UTF8
-    Write-Host "Created: $ProcName.md" -ForegroundColor Green
-}
+    -- [1] SourceObjectType
+    'SQL_STORED_PROCEDURE' AS SourceObjectType,
+
+    -- [2] TargetName (The Parameter Name)
+    p.name AS TargetName,
+
+    -- [3] TargetType (The Data Type)
+    -- CRITICAL: We replace commas with spaces (e.g. DECIMAL(10,2) -> DECIMAL(10 2))
+    -- This prevents breaking the C# CSV split logic.
+    REPLACE(
+        TYPE_NAME(p.user_type_id) + 
+        CASE 
+            WHEN TYPE_NAME(p.user_type_id) IN ('varchar', 'nvarchar', 'char', 'nchar') 
+            THEN '(' + CAST(CASE WHEN p.max_length = -1 THEN 'MAX' ELSE CAST(p.max_length AS VARCHAR) END AS VARCHAR) + ')'
+            WHEN TYPE_NAME(p.user_type_id) IN ('decimal', 'numeric')
+            THEN '(' + CAST(p.precision AS VARCHAR) + ' ' + CAST(p.scale AS VARCHAR) + ')'
+            ELSE '' 
+        END +
+        CASE WHEN p.is_output = 1 THEN ' (OUTPUT)' ELSE '' END,
+        ',', ' '
+    ) AS TargetType,
+
+    -- [4] RowType
+    'PARAMETER' AS RowType
+FROM sys.parameters p
+WHERE p.object_id = OBJECT_ID(@TargetProc);
