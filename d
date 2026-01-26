@@ -8,24 +8,28 @@ WITH FormalTree AS (
         sed.referencing_id,
         sed.referenced_id,
         
-        -- Safe Source Name
+        -- Source Name
         CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) 
              AS NVARCHAR(MAX)) AS SourceName,
 
-        -- Safe Target Name (Handles missing schemas for broken objects)
+        -- Target Name (Handles missing schemas)
         CAST(
             ISNULL(sed.referenced_schema_name, '???') + '.' + ISNULL(sed.referenced_entity_name, '???') 
             AS NVARCHAR(MAX)
         ) AS TargetName,
         
+        -- Target Type (New Column)
+        CAST(ISNULL(obj.type_desc, 'BROKEN_REF') AS NVARCHAR(MAX)) AS TargetType,
+
         1 AS Level,
         
-        -- Path Tracking for Cycle Detection
+        -- Path Tracking
         CAST('/' + CAST(sed.referencing_id AS VARCHAR(MAX)) + '/' + 
              ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/' 
              AS VARCHAR(MAX)) AS Path
 
     FROM sys.sql_expression_dependencies sed
+    LEFT JOIN sys.objects obj ON sed.referenced_id = obj.object_id
     WHERE sed.referencing_id = OBJECT_ID(@TargetObjectName)
 
     UNION ALL
@@ -45,6 +49,9 @@ WITH FormalTree AS (
             AS NVARCHAR(MAX)
         ),
         
+        -- Recursive Target Type
+        CAST(ISNULL(obj.type_desc, 'BROKEN_REF') AS NVARCHAR(MAX)),
+
         t.Level + 1,
         
         -- Update Path
@@ -52,11 +59,24 @@ WITH FormalTree AS (
 
     FROM sys.sql_expression_dependencies sed
     INNER JOIN FormalTree t ON sed.referencing_id = t.referenced_id
+    LEFT JOIN sys.objects obj ON sed.referenced_id = obj.object_id
     WHERE sed.referenced_entity_name IS NOT NULL
-      -- STOP if we have seen this ID before in the current chain (Cycle Check)
+      -- Cycle Check
       AND t.Path NOT LIKE '%/' + ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/%'
 )
 
+-- =============================================
+-- 3. FINAL OUTPUT
+-- =============================================
+SELECT DISTINCT 
+    SourceName, 
+    TargetName, 
+    TargetType,
+    Level, 
+    'FORMAL' AS Method
+FROM FormalTree
+ORDER BY Level, TargetName
+OPTION (MAXRECURSION 300);
 -- =============================================
 -- 3. FINAL OUTPUT
 -- =============================================
