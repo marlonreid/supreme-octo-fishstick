@@ -115,12 +115,17 @@ foreach ($Folder in $DataFolders) {
     $Content += 'await dv.view("_scripts/dependencies")'
     $Content += "```"
 
+# ... inside the foreach loop ...
+
     # =========================================================
     # 5. WRITE FILE
     # =========================================================
-    $SafeName = $ProcName -replace '[\\/*?:"<>|]', '_'
+    
+    # Sanitize Filename: Allow only alphanumeric, spaces, dots, dashes, underscores
+    $SafeName = $ProcName -replace '[^a-zA-Z0-9\s\.\-_]', '_'
+    
     $FilePath = Join-Path $FullFolderPath "$SafeName.md"
     
     Set-Content -Path $FilePath -Value ($Content -join "`n") -Encoding UTF8
-    Write-Host " -> OK" -ForegroundColor Green
+    Write-Host " -> OK ($SafeName.md)" -ForegroundColor Green
 }
