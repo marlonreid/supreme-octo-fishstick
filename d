@@ -76,55 +76,69 @@ OPTION (MAXRECURSION 300);
 
 
 -------------------------------------
-
-
 DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup';
 
 -- 1. Get the Code
 DECLARE @Code NVARCHAR(MAX);
 SELECT @Code = definition FROM sys.sql_modules WHERE object_id = OBJECT_ID(@TargetObjectName);
 
--- 2. Recursive Pattern Matcher
+-- 2. "Token Hopping" Recursive Search
 WITH FlagScanner AS (
     -- ANCHOR: Find the first occurrence
     SELECT 
         1 AS MatchID,
+        -- Find 'Characteristic_Name'
         CHARINDEX('Characteristic_Name', @Code) AS KeywordPos,
-        -- Find the opening quote after the keyword (handles N' and ')
-        PATINDEX('%[''N]''%', SUBSTRING(@Code, CHARINDEX('Characteristic_Name', @Code), 200)) AS QuoteRelPos
+        -- Find next '=' after Keyword
+        CHARINDEX('=', @Code, CHARINDEX('Characteristic_Name', @Code)) AS EqualsPos,
+        -- Find next "'" after '='
+        CHARINDEX('''', @Code, CHARINDEX('=', @Code, CHARINDEX('Characteristic_Name', @Code))) AS OpenQuotePos
     WHERE CHARINDEX('Characteristic_Name', @Code) > 0
 
     UNION ALL
 
-    -- RECURSIVE: Find the next occurrence
+    -- RECURSIVE: Search for the next one starting AFTER the last match closed
     SELECT 
         MatchID + 1,
-        CHARINDEX('Characteristic_Name', @Code, KeywordPos + 1),
-        PATINDEX('%[''N]''%', SUBSTRING(@Code, CHARINDEX('Characteristic_Name', @Code, KeywordPos + 1), 200))
-    FROM FlagScanner
-    WHERE CHARINDEX('Characteristic_Name', @Code, KeywordPos + 1) > 0
+        -- Find next 'Characteristic_Name' after the previous quote closed
+        CHARINDEX('Characteristic_Name', @Code, CloseQuotePos + 1),
+        -- Find next '='
+        CHARINDEX('=', @Code, CHARINDEX('Characteristic_Name', @Code, CloseQuotePos + 1)),
+        -- Find next "'"
+        CHARINDEX('''', @Code, CHARINDEX('=', @Code, CHARINDEX('Characteristic_Name', @Code, CloseQuotePos + 1)))
+    FROM (
+        -- Inner calculation to find the closing quote of the CURRENT match so we know where to start looking for the NEXT one
+        SELECT 
+            MatchID,
+            KeywordPos,
+            EqualsPos,
+            OpenQuotePos,
+            -- Find the closing quote (start looking 1 char after open quote)
+            CHARINDEX('''', @Code, OpenQuotePos + 1) AS CloseQuotePos
+        FROM FlagScanner
+    ) AS Prev
+    WHERE CHARINDEX('Characteristic_Name', @Code, CloseQuotePos + 1) > 0
 )
 
+-- 3. Extract and Clean
 SELECT DISTINCT
     OBJECT_SCHEMA_NAME(OBJECT_ID(@TargetObjectName)) + '.' + OBJECT_NAME(OBJECT_ID(@TargetObjectName)) AS SourceName,
-    
-    -- EXTRACTION LOGIC:
-    -- 1. Go to Keyword Position
-    -- 2. Jump forward to the opening quote (QuoteRelPos)
-    -- 3. Extract text until the next quote
     SUBSTRING(
         @Code, 
-        KeywordPos + QuoteRelPos, -- Start right after the opening quote
-        CHARINDEX('''', @Code, KeywordPos + QuoteRelPos) - (KeywordPos + QuoteRelPos)
+        OpenQuotePos + 1, 
+        CHARINDEX('''', @Code, OpenQuotePos + 1) - (OpenQuotePos + 1)
     ) AS TargetName,
-    
     1 AS Level,
     'CHARACTERISTIC' AS Method
-FROM FlagScanner
-WHERE QuoteRelPos > 0 -- Ensure we actually found a quote structure
+FROM (
+    SELECT 
+        MatchID, OpenQuotePos,
+        -- Recalculate CloseQuotePos for the final extraction
+        CHARINDEX('''', @Code, OpenQuotePos + 1) AS CloseQuotePos
+    FROM FlagScanner
+) Final
+WHERE OpenQuotePos > 0 AND CloseQuotePos > 0
 ORDER BY TargetName;
-
-
 -------------------------
 
 
