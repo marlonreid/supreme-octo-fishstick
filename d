@@ -1,109 +1,175 @@
-DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup'; -- Format: Schema.ProcName
+using System.Text;
 
-WITH FormalTree AS (
-    -- =============================================
-    -- 1. ANCHOR: Direct Dependencies (Level 1)
-    -- =============================================
-    SELECT 
-        sed.referencing_id,
-        sed.referenced_id,
+// CONFIGURATION
+string vaultRoot = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), ".."));
+string currentDir = Directory.GetCurrentDirectory();
+
+// MAPPING: SQL Type -> Folder Name
+// The "type: ..." frontmatter will be the Folder Name minus the 's' (e.g., "tables" -> "table")
+var typeMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+{
+    { "SQL_STORED_PROCEDURE",      "stored procedures" },
+    { "USER_TABLE",                "tables" },
+    { "SQL_SCALAR_FUNCTION",       "functions" },
+    { "SQL_TABLE_VALUED_FUNCTION", "functions" },
+    { "VIEW",                      "views" },
+    // Fallback for generic table types if SQL varies
+    { "U",                         "tables" },
+    { "P",                         "stored procedures" }
+};
+
+Console.ForegroundColor = ConsoleColor.Cyan;
+Console.WriteLine($"Scanning for CSVs in: {currentDir}");
+Console.WriteLine($"Vault Root: {vaultRoot}");
+Console.ResetColor();
+
+// TRACKING
+var createdFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+var potentialLeaves = new List<LeafNode>();
+
+// 1. GET ALL CSV FILES
+var csvFiles = Directory.GetFiles(currentDir, "*.csv");
+
+// =========================================================
+// PASS 1: PROCESS SOURCE FILES (The CSVs)
+// =========================================================
+foreach (var filePath in csvFiles)
+{
+    string procName = Path.GetFileNameWithoutExtension(filePath);
+    var downLinks = new HashSet<string>();
+    var paramsList = new List<string>();
+    string objectType = "SQL_STORED_PROCEDURE"; // Default
+
+    // Read CSV Lines
+    var lines = File.ReadAllLines(filePath).Skip(1); // Skip Header
+
+    foreach (var line in lines)
+    {
+        // Simple CSV Split (Assumes no commas inside quotes for simplicity)
+        var cols = line.Split(',');
+        if (cols.Length < 4) continue; // Skip bad rows
+
+        // CSV Structure expected: SourceName, SourceObjectType, TargetName, TargetType, RowType
+        // Adjust indices based on your actual CSV columns. 
+        // Based on previous script: 
+        // 0:Source, 1:SourceType, 2:Target, 3:TargetType, 4:RowType
         
-        -- Source Name
-        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) 
-             AS NVARCHAR(MAX)) AS SourceName,
+        string rowSourceType = cols[1];
+        string targetName    = cols[2];
+        string targetType    = cols[3];
+        string rowType       = cols.Length > 4 ? cols[4] : "DEPENDENCY";
 
-        -- Target Name (Handles missing schemas)
-        CAST(
-            ISNULL(sed.referenced_schema_name, '???') + '.' + ISNULL(sed.referenced_entity_name, '???') 
-            AS NVARCHAR(MAX)
-        ) AS TargetName,
-        
-        1 AS Level,
-        
-        -- Path Tracking
-        CAST('/' + CAST(sed.referencing_id AS VARCHAR(MAX)) + '/' + 
-             ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/' 
-             AS VARCHAR(MAX)) AS Path
+        // Update Master Object Type (if valid)
+        if (!string.IsNullOrWhiteSpace(rowSourceType)) objectType = rowSourceType;
 
-    FROM sys.sql_expression_dependencies sed
-    WHERE sed.referencing_id = OBJECT_ID(@TargetObjectName)
+        if (rowType == "PARAMETER")
+        {
+            paramsList.Add($"{targetName}: {targetType}");
+        }
+        else // DEPENDENCY
+        {
+            if (!string.IsNullOrWhiteSpace(targetName))
+            {
+                string link = $"\"[[{targetName}]]\"";
+                downLinks.Add(link);
 
-    UNION ALL
+                // STORE FOR PASS 2
+                potentialLeaves.Add(new LeafNode(targetName, targetType));
+            }
+        }
+    }
 
-    -- =============================================
-    -- 2. RECURSIVE MEMBER: Indirect Dependencies (Level 2+)
-    -- NO OUTER JOINS ALLOWED HERE
-    -- =============================================
-    SELECT 
-        sed.referencing_id,
-        sed.referenced_id,
-        
-        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) 
-             AS NVARCHAR(MAX)),
+    // GENERATE FILE
+    CreateObsidianFile(vaultRoot, procName, objectType, paramsList, downLinks.ToList());
+    createdFiles.Add(procName);
+}
 
-        CAST(
-            ISNULL(sed.referenced_schema_name, '???') + '.' + ISNULL(sed.referenced_entity_name, '???') 
-            AS NVARCHAR(MAX)
-        ),
-        
-        t.Level + 1,
-        
-        -- Update Path
-        CAST(t.Path + ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/' AS VARCHAR(MAX))
+// =========================================================
+// PASS 2: PROCESS LEAF NODES (Tables/Views)
+// =========================================================
+Console.ForegroundColor = ConsoleColor.Cyan;
+Console.WriteLine("PASS 2: Generating leaf nodes...");
+Console.ResetColor();
 
-    FROM sys.sql_expression_dependencies sed
-    INNER JOIN FormalTree t ON sed.referencing_id = t.referenced_id
-    WHERE sed.referenced_entity_name IS NOT NULL
-      -- Cycle Check
-      AND t.Path NOT LIKE '%/' + ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/%'
-)
+// Group by Name to avoid duplicates
+var uniqueLeaves = potentialLeaves
+    .GroupBy(x => x.Name)
+    .Select(g => g.First())
+    .ToList();
 
--- =============================================
--- 3. FINAL OUTPUT
--- Join to sys.objects happens HERE, outside the recursion
--- =============================================
-SELECT DISTINCT 
-    ft.SourceName, 
-    ft.TargetName, 
-    -- If join fails (ID is null or object gone), it's a broken ref
-    ISNULL(obj.type_desc, 'BROKEN_REF') AS TargetType,
-    ft.Level, 
-    'FORMAL' AS Method
-FROM FormalTree ft
-LEFT JOIN sys.objects obj ON ft.referenced_id = obj.object_id
-ORDER BY ft.Level, ft.TargetName
-OPTION (MAXRECURSION 300);
+foreach (var leaf in uniqueLeaves)
+{
+    // If we already created this file in Pass 1 (it was a source), skip it
+    if (createdFiles.Contains(leaf.Name)) continue;
 
-
--------------------------------------
-DECLARE @TargetProc NVARCHAR(MAX) = NULL; -- Set 'dbo.YourProc' to test one, NULL for all
-DECLARE @SearchTerm NVARCHAR(100) = 'Characteristic_Name';
-
-SELECT 
-    OBJECT_SCHEMA_NAME(object_id) + '.' + OBJECT_NAME(object_id) AS [Procedure Name],
+    // Check if it's a known type (like USER_TABLE)
+    // If leaf.Type is "USER_TABLE", GetFolder returns "tables"
+    // The CreateObsidianFile method strips the 's', setting type: "table"
+    string folder = GetFolder(leaf.Type);
     
-    -- The Math: (Total Bytes - Bytes After Removal) / Bytes Per Keyword
-    (DATALENGTH(definition) - DATALENGTH(REPLACE(UPPER(definition), UPPER(@SearchTerm), ''))) 
-    / DATALENGTH(CAST(@SearchTerm AS NVARCHAR(100))) AS [Occurrences],
+    // If mapped, create it. If not (e.g. BROKEN_REF), skip or put in others.
+    if (folder != "others") 
+    {
+        CreateObsidianFile(vaultRoot, leaf.Name, leaf.Type, new List<string>(), new List<string>(), isLeaf: true);
+        Console.WriteLine($" -> Created Leaf: {leaf.Name} ({leaf.Type})");
+        createdFiles.Add(leaf.Name);
+    }
+}
+
+Console.ForegroundColor = ConsoleColor.Green;
+Console.WriteLine("Vault Update Complete.");
+Console.ResetColor();
+
+
+// =========================================================
+// HELPER METHODS & CLASSES
+// =========================================================
+
+void CreateObsidianFile(string root, string name, string sqlType, List<string> parameters, List<string> dependencies, bool isLeaf = false)
+{
+    string folder = GetFolder(sqlType);
+    string dirPath = Path.Combine(root, folder);
+    Directory.CreateDirectory(dirPath);
+
+    string typeProperty = folder.TrimEnd('s'); // "tables" -> "table"
+
+    var sb = new StringBuilder();
+    sb.AppendLine("---");
+    sb.AppendLine($"type: {typeProperty}");
     
-    'Manual Check Required' AS [Action]
-FROM sys.sql_modules
-WHERE definition LIKE '%' + @SearchTerm + '%'
-  AND (@TargetProc IS NULL OR object_id = OBJECT_ID(@TargetProc))
-ORDER BY [Occurrences] DESC;
-      -------------------------
+    if (parameters.Any())
+    {
+        sb.AppendLine("params:");
+        foreach (var p in parameters) sb.AppendLine($"  - {p}");
+    }
 
+    if (dependencies.Any())
+    {
+        sb.AppendLine("down:");
+        foreach (var d in dependencies.OrderBy(x => x)) sb.AppendLine($"  - {d}");
+    }
+    else
+    {
+        sb.AppendLine("down: []");
+    }
 
-DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup';
+    sb.AppendLine("---");
+    sb.AppendLine();
+    if (isLeaf) sb.AppendLine("*(Auto-generated leaf node)*");
+    sb.AppendLine();
+    sb.AppendLine("```dataviewjs");
+    sb.AppendLine("await dv.view(\"_scripts/dependencies\")");
+    sb.AppendLine("```");
 
-SELECT DISTINCT
-    OBJECT_SCHEMA_NAME(m.object_id) + '.' + OBJECT_NAME(m.object_id) AS SourceName,
-    t.name AS TargetName,
-    1 AS Level,
-    'DYNAMIC_TEXT' AS Method
-FROM sys.sql_modules m
-CROSS JOIN sys.tables t
-WHERE m.object_id = OBJECT_ID(@TargetObjectName)
-  -- Find table name surrounded by non-alphanumeric chars
-  AND m.definition LIKE '%[^a-z0-9]' + t.name + '[^a-z0-9]%'
-ORDER BY TargetName;    
+    // Sanitize filename if needed
+    string safeName = name.Replace("/", "_").Replace("\\", "_");
+    File.WriteAllText(Path.Combine(dirPath, $"{safeName}.md"), sb.ToString());
+}
+
+string GetFolder(string sqlType)
+{
+    if (string.IsNullOrEmpty(sqlType)) return "others";
+    return typeMap.ContainsKey(sqlType) ? typeMap[sqlType] : "others";
+}
+
+record LeafNode(string Name, string Type);
