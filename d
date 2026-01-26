@@ -2,13 +2,14 @@ DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup';
 
 WITH FormalTree AS (
     -- ANCHOR: Direct Dependencies
+-- ANCHOR: Direct Dependencies
     SELECT 
         sed.referencing_id,
         sed.referenced_id,
         CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(MAX)) AS SourceName,
-        CAST(sed.referenced_schema_name + '.' + sed.referenced_entity_name AS NVARCHAR(MAX)) AS TargetName,
+        -- FIXED: Handle NULL Schemas
+        CAST(ISNULL(sed.referenced_schema_name, '???') + '.' + ISNULL(sed.referenced_entity_name, '???') AS NVARCHAR(MAX)) AS TargetName,
         1 AS Level,
-        -- Track the path: "/SourceID/TargetID/"
         CAST('/' + CAST(sed.referencing_id AS VARCHAR(MAX)) + '/' + CAST(sed.referenced_id AS VARCHAR(MAX)) + '/' AS VARCHAR(MAX)) AS Path
     FROM sys.sql_expression_dependencies sed
     WHERE sed.referencing_id = OBJECT_ID(@TargetObjectName)
