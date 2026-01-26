@@ -80,22 +80,49 @@ OPTION (MAXRECURSION 300);
 
 DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup';
 
-SELECT 
-    OBJECT_SCHEMA_NAME(object_id) + '.' + OBJECT_NAME(object_id) AS SourceName,
-    -- Extract the flag name, cleaning up N', ', and ;
-    REPLACE(REPLACE(REPLACE(REPLACE(
-        SUBSTRING(
-            definition, 
-            PATINDEX('%Characteristic_Name%=[N'']%', definition) + 20, 
-            50 -- Grab enough characters to catch the name
-        ), 
-    'N''', ''), '''', ''), ';', ''), ' ', '') AS TargetName,
+-- 1. Get the Code
+DECLARE @Code NVARCHAR(MAX);
+SELECT @Code = definition FROM sys.sql_modules WHERE object_id = OBJECT_ID(@TargetObjectName);
+
+-- 2. Recursive Pattern Matcher
+WITH FlagScanner AS (
+    -- ANCHOR: Find the first occurrence
+    SELECT 
+        1 AS MatchID,
+        CHARINDEX('Characteristic_Name', @Code) AS KeywordPos,
+        -- Find the opening quote after the keyword (handles N' and ')
+        PATINDEX('%[''N]''%', SUBSTRING(@Code, CHARINDEX('Characteristic_Name', @Code), 200)) AS QuoteRelPos
+    WHERE CHARINDEX('Characteristic_Name', @Code) > 0
+
+    UNION ALL
+
+    -- RECURSIVE: Find the next occurrence
+    SELECT 
+        MatchID + 1,
+        CHARINDEX('Characteristic_Name', @Code, KeywordPos + 1),
+        PATINDEX('%[''N]''%', SUBSTRING(@Code, CHARINDEX('Characteristic_Name', @Code, KeywordPos + 1), 200))
+    FROM FlagScanner
+    WHERE CHARINDEX('Characteristic_Name', @Code, KeywordPos + 1) > 0
+)
+
+SELECT DISTINCT
+    OBJECT_SCHEMA_NAME(OBJECT_ID(@TargetObjectName)) + '.' + OBJECT_NAME(OBJECT_ID(@TargetObjectName)) AS SourceName,
+    
+    -- EXTRACTION LOGIC:
+    -- 1. Go to Keyword Position
+    -- 2. Jump forward to the opening quote (QuoteRelPos)
+    -- 3. Extract text until the next quote
+    SUBSTRING(
+        @Code, 
+        KeywordPos + QuoteRelPos, -- Start right after the opening quote
+        CHARINDEX('''', @Code, KeywordPos + QuoteRelPos) - (KeywordPos + QuoteRelPos)
+    ) AS TargetName,
+    
     1 AS Level,
     'CHARACTERISTIC' AS Method
-FROM sys.sql_modules
-WHERE object_id = OBJECT_ID(@TargetObjectName)
-  AND definition LIKE '%Characteristic_Name%=[N'']%';
-
+FROM FlagScanner
+WHERE QuoteRelPos > 0 -- Ensure we actually found a quote structure
+ORDER BY TargetName;
 
 
 -------------------------
