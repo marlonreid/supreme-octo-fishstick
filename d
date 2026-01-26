@@ -76,70 +76,20 @@ OPTION (MAXRECURSION 300);
 
 
 -------------------------------------
-DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup';
+DECLARE @TargetProc NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup'; -- Set to NULL to scan EVERYTHING
 
--- 1. Get the Code
-DECLARE @Code NVARCHAR(MAX);
-SELECT @Code = definition FROM sys.sql_modules WHERE object_id = OBJECT_ID(@TargetObjectName);
-
--- 2. "Token Hopping" Recursive Search
-WITH FlagScanner AS (
-    -- ANCHOR: Find the first occurrence
-    SELECT 
-        1 AS MatchID,
-        -- Find 'Characteristic_Name'
-        CHARINDEX('Characteristic_Name', @Code) AS KeywordPos,
-        -- Find next '=' after Keyword
-        CHARINDEX('=', @Code, CHARINDEX('Characteristic_Name', @Code)) AS EqualsPos,
-        -- Find next "'" after '='
-        CHARINDEX('''', @Code, CHARINDEX('=', @Code, CHARINDEX('Characteristic_Name', @Code))) AS OpenQuotePos
-    WHERE CHARINDEX('Characteristic_Name', @Code) > 0
-
-    UNION ALL
-
-    -- RECURSIVE: Search for the next one starting AFTER the last match closed
-    SELECT 
-        MatchID + 1,
-        -- Find next 'Characteristic_Name' after the previous quote closed
-        CHARINDEX('Characteristic_Name', @Code, CloseQuotePos + 1),
-        -- Find next '='
-        CHARINDEX('=', @Code, CHARINDEX('Characteristic_Name', @Code, CloseQuotePos + 1)),
-        -- Find next "'"
-        CHARINDEX('''', @Code, CHARINDEX('=', @Code, CHARINDEX('Characteristic_Name', @Code, CloseQuotePos + 1)))
-    FROM (
-        -- Inner calculation to find the closing quote of the CURRENT match so we know where to start looking for the NEXT one
-        SELECT 
-            MatchID,
-            KeywordPos,
-            EqualsPos,
-            OpenQuotePos,
-            -- Find the closing quote (start looking 1 char after open quote)
-            CHARINDEX('''', @Code, OpenQuotePos + 1) AS CloseQuotePos
-        FROM FlagScanner
-    ) AS Prev
-    WHERE CHARINDEX('Characteristic_Name', @Code, CloseQuotePos + 1) > 0
-)
-
--- 3. Extract and Clean
-SELECT DISTINCT
-    OBJECT_SCHEMA_NAME(OBJECT_ID(@TargetObjectName)) + '.' + OBJECT_NAME(OBJECT_ID(@TargetObjectName)) AS SourceName,
-    SUBSTRING(
-        @Code, 
-        OpenQuotePos + 1, 
-        CHARINDEX('''', @Code, OpenQuotePos + 1) - (OpenQuotePos + 1)
-    ) AS TargetName,
-    1 AS Level,
-    'CHARACTERISTIC' AS Method
-FROM (
-    SELECT 
-        MatchID, OpenQuotePos,
-        -- Recalculate CloseQuotePos for the final extraction
-        CHARINDEX('''', @Code, OpenQuotePos + 1) AS CloseQuotePos
-    FROM FlagScanner
-) Final
-WHERE OpenQuotePos > 0 AND CloseQuotePos > 0
-ORDER BY TargetName;
--------------------------
+SELECT 
+    OBJECT_SCHEMA_NAME(m.object_id) + '.' + OBJECT_NAME(m.object_id) AS [Procedure Name],
+    -- The Logic: (TotalLen - LenWithoutKeyword) / LenKeyword = Count
+    (LEN(m.definition) - LEN(REPLACE(UPPER(m.definition), 'CHARACTERISTIC_NAME', ''))) 
+    / LEN('Characteristic_Name') AS [Count],
+    'Manual Check Required' AS [Action]
+FROM sys.sql_modules m
+WHERE m.definition LIKE '%Characteristic_Name%'
+  -- Filter by specific proc, or run on everything if NULL
+  AND (@TargetProc IS NULL OR m.object_id = OBJECT_ID(@TargetProc))
+ORDER BY [Count] DESC;
+      -------------------------
 
 
 DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup';
