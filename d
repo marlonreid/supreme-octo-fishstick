@@ -1,12 +1,12 @@
-DECLARE @TargetObjectName NVARCHAR(255) = 'dbo.CentralStorage_Cleanup'; -- INCLUDE SCHEMA
+DECLARE @TargetObjectName NVARCHAR(255) = 'dbo.CentralStorage_Cleanup'; 
 
 WITH DependencyTree AS (
-    -- BASE CASE: Get direct dependencies
+    -- 1. ANCHOR: Direct dependencies
     SELECT 
         referencing_id AS SourceID,
         referenced_id AS TargetID,
-        OBJECT_SCHEMA_NAME(referencing_id) + '.' + OBJECT_NAME(referencing_id) AS SourceName,
-        referenced_schema_name + '.' + referenced_entity_name AS TargetName,
+        CAST(OBJECT_SCHEMA_NAME(referencing_id) + '.' + OBJECT_NAME(referencing_id) AS NVARCHAR(500)) AS SourceName,
+        CAST(referenced_schema_name + '.' + referenced_entity_name AS NVARCHAR(500)) AS TargetName,
         1 AS Level,
         CAST('FORMAL' AS VARCHAR(20)) AS DiscoveryMethod
     FROM sys.sql_expression_dependencies
@@ -14,54 +14,49 @@ WITH DependencyTree AS (
 
     UNION ALL
 
-    -- RECURSIVE STEP: Indirect dependencies
+    -- 2. RECURSIVE: Indirect dependencies
     SELECT 
         sed.referencing_id,
         sed.referenced_id,
-        OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id),
-        sed.referenced_schema_name + '.' + sed.referenced_entity_name,
+        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(500)),
+        CAST(sed.referenced_schema_name + '.' + sed.referenced_entity_name AS NVARCHAR(500)),
         dt.Level + 1,
-        'FORMAL'
+        CAST('FORMAL' AS VARCHAR(20)) -- Type match for recursion
     FROM sys.sql_expression_dependencies sed
     INNER JOIN DependencyTree dt ON sed.referencing_id = dt.TargetID
     WHERE sed.referenced_entity_name IS NOT NULL
 ),
 CharacteristicScan AS (
-    -- FEATURE FLAG CATCHER
-    -- Looks for .Characteristic_Name = N'FlagName' or .Characteristic_Name='FlagName'
+    -- 3. CHARACTERISTIC CATCHER
     SELECT 
         m.object_id AS SourceID,
-        NULL AS TargetID,
-        OBJECT_SCHEMA_NAME(m.object_id) + '.' + OBJECT_NAME(m.object_id) AS SourceName,
-        -- Extract just the name between the quotes
-        SUBSTRING(
-            m.definition, 
-            CHARINDEX('Characteristic_Name', m.definition), 
-            100 -- Grab a chunk to parse
-        ) AS RawMatch,
-        1 AS Level,
-        'CHARACTERISTIC' AS DiscoveryMethod
+        CAST(OBJECT_SCHEMA_NAME(m.object_id) + '.' + OBJECT_NAME(m.object_id) AS NVARCHAR(500)) AS SourceName,
+        -- Extract the chunk containing the flag
+        CAST(SUBSTRING(m.definition, CHARINDEX('Characteristic_Name', m.definition), 200) AS NVARCHAR(500)) AS RawMatch
     FROM sys.sql_modules m
     WHERE m.object_id = OBJECT_ID(@TargetObjectName)
       AND m.definition LIKE '%Characteristic_Name%=' + '%'
 )
 
--- Final Output
+-- FINAL OUTPUT: Merging all discovered links
 SELECT DISTINCT 
     SourceName, 
     TargetName, 
     Level, 
     DiscoveryMethod 
 FROM DependencyTree
+
 UNION ALL
--- This sub-select cleans up the characteristic string extraction
+
+-- Adding cleaned Characteristic results
 SELECT 
     SourceName,
-    -- Simple cleanup logic to get the value inside the quotes
-    REPLACE(REPLACE(REPLACE(
-        SUBSTRING(RawMatch, CHARINDEX('=', RawMatch) + 1, 50), 
-        'N''', ''), '''', ''), ';', '') AS TargetName,
-    Level,
-    DiscoveryMethod
+    -- Cleaning the extracted N'name' or 'name' string
+    CAST(REPLACE(REPLACE(REPLACE(
+        SUBSTRING(RawMatch, CHARINDEX('=', RawMatch) + 1, 100), 
+        'N''', ''), '''', ''), ';', '') AS NVARCHAR(500)) AS TargetName,
+    1 AS Level,
+    CAST('CHARACTERISTIC' AS VARCHAR(20)) AS DiscoveryMethod
 FROM CharacteristicScan
+
 ORDER BY Level, DiscoveryMethod DESC;
