@@ -1,28 +1,15 @@
-const startPage = dv.current().file.path;
-const results = [];
-const visited = new Set();
-
-function findDescendants(pagePath) {
-    if (visited.has(pagePath)) return;
-    visited.add(pagePath);
-    
-    let page = dv.page(pagePath);
-    if (!page) return;
-
-    // Check if the current note in the recursion is a table
-    // (And make sure we don't list the starting page itself)
-    if (page.type === "table" && page.file.path !== startPage) {
-        results.push(page.file.link);
-    }
-
-    // Look at everything in the "down" property (Breadcrumbs field)
-    let children = dv.array(page.down);
-    for (let child of children) {
-        if (child && child.path) {
-            findDescendants(child.path);
-        }
-    }
-}
-
-findDescendants(startPage);
-dv.list(results);
+SELECT DISTINCT
+    referencing_obj.name AS [SourceObjectName],
+    referencing_obj.type_desc AS [SourceObjectType],
+    referenced_entity_name AS [ReferencedEntityName],
+    -- Check if it's a Table, View, or another Function
+    COALESCE(referenced_obj.type_desc, 'EXTERNAL/UNKNOWN') AS [ReferencedObjectType]
+FROM sys.sql_expression_dependencies AS sed
+INNER JOIN sys.objects AS referencing_obj 
+    ON sed.referencing_id = referencing_obj.object_id
+LEFT JOIN sys.objects AS referenced_obj 
+    ON sed.referenced_id = referenced_obj.object_id
+WHERE 
+    referencing_obj.type IN ('P', 'FN', 'IF', 'TF') -- Procs and various Function types
+    AND sed.referenced_entity_name IS NOT NULL
+ORDER BY [SourceObjectName], [ReferencedEntityName];
