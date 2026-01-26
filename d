@@ -76,19 +76,21 @@ OPTION (MAXRECURSION 300);
 
 
 -------------------------------------
-DECLARE @TargetProc NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup'; -- Set to NULL to scan EVERYTHING
+DECLARE @TargetProc NVARCHAR(MAX) = NULL; -- Set 'dbo.YourProc' to test one, NULL for all
+DECLARE @SearchTerm NVARCHAR(100) = 'Characteristic_Name';
 
 SELECT 
-    OBJECT_SCHEMA_NAME(m.object_id) + '.' + OBJECT_NAME(m.object_id) AS [Procedure Name],
-    -- The Logic: (TotalLen - LenWithoutKeyword) / LenKeyword = Count
-    (LEN(m.definition) - LEN(REPLACE(UPPER(m.definition), 'CHARACTERISTIC_NAME', ''))) 
-    / LEN('Characteristic_Name') AS [Count],
+    OBJECT_SCHEMA_NAME(object_id) + '.' + OBJECT_NAME(object_id) AS [Procedure Name],
+    
+    -- The Math: (Total Bytes - Bytes After Removal) / Bytes Per Keyword
+    (DATALENGTH(definition) - DATALENGTH(REPLACE(UPPER(definition), UPPER(@SearchTerm), ''))) 
+    / DATALENGTH(CAST(@SearchTerm AS NVARCHAR(100))) AS [Occurrences],
+    
     'Manual Check Required' AS [Action]
-FROM sys.sql_modules m
-WHERE m.definition LIKE '%Characteristic_Name%'
-  -- Filter by specific proc, or run on everything if NULL
-  AND (@TargetProc IS NULL OR m.object_id = OBJECT_ID(@TargetProc))
-ORDER BY [Count] DESC;
+FROM sys.sql_modules
+WHERE definition LIKE '%' + @SearchTerm + '%'
+  AND (@TargetProc IS NULL OR object_id = OBJECT_ID(@TargetProc))
+ORDER BY [Occurrences] DESC;
       -------------------------
 
 
