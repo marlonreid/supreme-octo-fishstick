@@ -18,9 +18,6 @@ WITH FormalTree AS (
             AS NVARCHAR(MAX)
         ) AS TargetName,
         
-        -- Target Type (New Column)
-        CAST(ISNULL(obj.type_desc, 'BROKEN_REF') AS NVARCHAR(MAX)) AS TargetType,
-
         1 AS Level,
         
         -- Path Tracking
@@ -29,13 +26,13 @@ WITH FormalTree AS (
              AS VARCHAR(MAX)) AS Path
 
     FROM sys.sql_expression_dependencies sed
-    LEFT JOIN sys.objects obj ON sed.referenced_id = obj.object_id
     WHERE sed.referencing_id = OBJECT_ID(@TargetObjectName)
 
     UNION ALL
 
     -- =============================================
     -- 2. RECURSIVE MEMBER: Indirect Dependencies (Level 2+)
+    -- NO OUTER JOINS ALLOWED HERE
     -- =============================================
     SELECT 
         sed.referencing_id,
@@ -49,9 +46,6 @@ WITH FormalTree AS (
             AS NVARCHAR(MAX)
         ),
         
-        -- Recursive Target Type
-        CAST(ISNULL(obj.type_desc, 'BROKEN_REF') AS NVARCHAR(MAX)),
-
         t.Level + 1,
         
         -- Update Path
@@ -59,7 +53,6 @@ WITH FormalTree AS (
 
     FROM sys.sql_expression_dependencies sed
     INNER JOIN FormalTree t ON sed.referencing_id = t.referenced_id
-    LEFT JOIN sys.objects obj ON sed.referenced_id = obj.object_id
     WHERE sed.referenced_entity_name IS NOT NULL
       -- Cycle Check
       AND t.Path NOT LIKE '%/' + ISNULL(CAST(sed.referenced_id AS VARCHAR(MAX)), '0') + '/%'
@@ -67,26 +60,18 @@ WITH FormalTree AS (
 
 -- =============================================
 -- 3. FINAL OUTPUT
+-- Join to sys.objects happens HERE, outside the recursion
 -- =============================================
 SELECT DISTINCT 
-    SourceName, 
-    TargetName, 
-    TargetType,
-    Level, 
+    ft.SourceName, 
+    ft.TargetName, 
+    -- If join fails (ID is null or object gone), it's a broken ref
+    ISNULL(obj.type_desc, 'BROKEN_REF') AS TargetType,
+    ft.Level, 
     'FORMAL' AS Method
-FROM FormalTree
-ORDER BY Level, TargetName
-OPTION (MAXRECURSION 300);
--- =============================================
--- 3. FINAL OUTPUT
--- =============================================
-SELECT DISTINCT 
-    SourceName, 
-    TargetName, 
-    Level, 
-    'FORMAL' AS Method
-FROM FormalTree
-ORDER BY Level, TargetName
+FROM FormalTree ft
+LEFT JOIN sys.objects obj ON ft.referenced_id = obj.object_id
+ORDER BY ft.Level, ft.TargetName
 OPTION (MAXRECURSION 300);
 
 
