@@ -1,62 +1,71 @@
-DECLARE @TargetObjectName NVARCHAR(255) = 'dbo.CentralStorage_Cleanup'; 
+DECLARE @TargetObjectName NVARCHAR(MAX) = 'dbo.CentralStorage_Cleanup'; -- Format: Schema.ProcName
 
 WITH DependencyTree AS (
-    -- 1. ANCHOR: Direct dependencies
+    -- ANCHOR: Direct Dependencies
     SELECT 
-        referencing_id AS SourceID,
-        referenced_id AS TargetID,
-        CAST(OBJECT_SCHEMA_NAME(referencing_id) + '.' + OBJECT_NAME(referencing_id) AS NVARCHAR(500)) AS SourceName,
-        CAST(referenced_schema_name + '.' + referenced_entity_name AS NVARCHAR(500)) AS TargetName,
+        sed.referencing_id AS SourceID,
+        sed.referenced_id AS TargetID,
+        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(MAX)) AS SourceName,
+        CAST(sed.referenced_schema_name + '.' + sed.referenced_entity_name AS NVARCHAR(MAX)) AS TargetName,
         1 AS Level,
-        CAST('FORMAL' AS VARCHAR(20)) AS DiscoveryMethod
-    FROM sys.sql_expression_dependencies
-    WHERE referencing_id = OBJECT_ID(@TargetObjectName)
+        CAST(N'FORMAL' AS NVARCHAR(50)) AS DiscoveryMethod
+    FROM sys.sql_expression_dependencies sed
+    WHERE sed.referencing_id = OBJECT_ID(@TargetObjectName)
 
     UNION ALL
 
-    -- 2. RECURSIVE: Indirect dependencies
+    -- RECURSIVE MEMBER: Indirect Dependencies
     SELECT 
         sed.referencing_id,
         sed.referenced_id,
-        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(500)),
-        CAST(sed.referenced_schema_name + '.' + sed.referenced_entity_name AS NVARCHAR(500)),
+        CAST(OBJECT_SCHEMA_NAME(sed.referencing_id) + '.' + OBJECT_NAME(sed.referencing_id) AS NVARCHAR(MAX)),
+        CAST(sed.referenced_schema_name + '.' + sed.referenced_entity_name AS NVARCHAR(MAX)),
         dt.Level + 1,
-        CAST('FORMAL' AS VARCHAR(20)) -- Type match for recursion
+        CAST(N'FORMAL' AS NVARCHAR(50)) -- Must match Anchor Type exactly (NVARCHAR 50)
     FROM sys.sql_expression_dependencies sed
     INNER JOIN DependencyTree dt ON sed.referencing_id = dt.TargetID
     WHERE sed.referenced_entity_name IS NOT NULL
 ),
 CharacteristicScan AS (
-    -- 3. CHARACTERISTIC CATCHER
+    -- FEATURE FLAG SCANNER (Regex-ish search)
     SELECT 
         m.object_id AS SourceID,
-        CAST(OBJECT_SCHEMA_NAME(m.object_id) + '.' + OBJECT_NAME(m.object_id) AS NVARCHAR(500)) AS SourceName,
-        -- Extract the chunk containing the flag
-        CAST(SUBSTRING(m.definition, CHARINDEX('Characteristic_Name', m.definition), 200) AS NVARCHAR(500)) AS RawMatch
+        CAST(NULL AS INT) AS TargetID, -- Placeholder to match column count if needed
+        CAST(OBJECT_SCHEMA_NAME(m.object_id) + '.' + OBJECT_NAME(m.object_id) AS NVARCHAR(MAX)) AS SourceName,
+        -- Extract the value after "Characteristic_Name="
+        CAST(SUBSTRING(
+            m.definition, 
+            PATINDEX('%Characteristic_Name%=[N'']%', m.definition) + 20, 
+            50
+        ) AS NVARCHAR(MAX)) AS RawMatch,
+        1 AS Level,
+        CAST(N'CHARACTERISTIC' AS NVARCHAR(50)) AS DiscoveryMethod
     FROM sys.sql_modules m
     WHERE m.object_id = OBJECT_ID(@TargetObjectName)
-      AND m.definition LIKE '%Characteristic_Name%=' + '%'
+      AND m.definition LIKE '%Characteristic_Name%=[N'']%'
 )
 
--- FINAL OUTPUT: Merging all discovered links
-SELECT DISTINCT 
-    SourceName, 
-    TargetName, 
-    Level, 
-    DiscoveryMethod 
+-- FINAL OUTPUT
+SELECT DISTINCT
+    SourceName,
+    TargetName,
+    Level,
+    DiscoveryMethod
 FROM DependencyTree
 
 UNION ALL
 
--- Adding cleaned Characteristic results
+-- Clean up the Characteristic data before showing it
 SELECT 
     SourceName,
-    -- Cleaning the extracted N'name' or 'name' string
-    CAST(REPLACE(REPLACE(REPLACE(
-        SUBSTRING(RawMatch, CHARINDEX('=', RawMatch) + 1, 100), 
-        'N''', ''), '''', ''), ';', '') AS NVARCHAR(500)) AS TargetName,
-    1 AS Level,
-    CAST('CHARACTERISTIC' AS VARCHAR(20)) AS DiscoveryMethod
+    -- Clean up quotes, semi-colons, and N prefixes from the extracted value
+    CAST(
+        REPLACE(REPLACE(REPLACE(REPLACE(
+            LEFT(RawMatch, CHARINDEX('''', RawMatch + '''') - 1), 
+        'N''', ''), '''', ''), ';', ''), ' ', '') 
+    AS NVARCHAR(MAX)) AS TargetName,
+    Level,
+    DiscoveryMethod
 FROM CharacteristicScan
-
+WHERE RawMatch IS NOT NULL
 ORDER BY Level, DiscoveryMethod DESC;
