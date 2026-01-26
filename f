@@ -4,7 +4,7 @@
 # The Vault Root is ONE LEVEL UP from where this script runs
 $VaultRoot = Resolve-Path ".." 
 
-# Mapping SQL Types to Obsidian Folder Names
+# Map SQL Types to Obsidian Folder Names
 $TypeMap = @{
     "SQL_STORED_PROCEDURE"      = "stored procedures"
     "USER_TABLE"                = "tables"
@@ -15,94 +15,87 @@ $TypeMap = @{
 }
 
 # =========================================================
-# 1. FIND ALL DATA FOLDERS
+# 1. PROCESS FOLDERS
 # =========================================================
-# We look for folders in the current directory
 $DataFolders = Get-ChildItem -Directory
 
-Write-Host "Found $($DataFolders.Count) object folders to process..." -ForegroundColor Cyan
+Write-Host "Found $($DataFolders.Count) object folders. Processing..." -ForegroundColor Cyan
 
 foreach ($Folder in $DataFolders) {
     $ProcName = $Folder.Name
-    Write-Host "Processing: $ProcName" -NoNewline
     
-    # Paths to the specific CSVs inside this folder
+    # Paths to the CSVs inside the current Proc's folder
     $CsvPath_Formal  = Join-Path $Folder.FullName "formal.csv"
     $CsvPath_Dynamic = Join-Path $Folder.FullName "dynamic.csv"
     $CsvPath_Chars   = Join-Path $Folder.FullName "characteristics.csv"
 
     $DownList = @()
-    $ObjectType = "SQL_STORED_PROCEDURE" # Default if not found in CSV
+    $ObjectType = "SQL_STORED_PROCEDURE" # Default
 
-    # =========================================================
-    # 2. READ AND MERGE DATA
-    # =========================================================
-    
-    # --- Process FORMAL Dependencies ---
+    # --- 1A. Process FORMAL CSV ---
     if (Test-Path $CsvPath_Formal) {
         $Data = Import-Csv $CsvPath_Formal
         foreach ($Row in $Data) {
-            # Try to grab the object type from the first row of the formal export
+            # Capture Object Type from the first row that defines the source
             if ($Row.Level -eq "1" -and $Row.SourceName -eq $ProcName -and $Row.SourceObjectType) {
                 $ObjectType = $Row.SourceObjectType
             }
             
-            # Only add Level 1 (Direct) dependencies to the YAML
-            if ($Row.Level -eq "1" -and -not [string]::IsNullOrWhiteSpace($Row.TargetName)) {
+            # Add Direct Dependencies (Level 1)
+            if ($Row.Level -eq "1" -and !([string]::IsNullOrWhiteSpace($Row.TargetName))) {
                 $Link = '"[[{0}]]"' -f $Row.TargetName
                 if ($DownList -notcontains $Link) { $DownList += $Link }
             }
         }
     }
 
-    # --- Process DYNAMIC Dependencies ---
+    # --- 1B. Process DYNAMIC CSV ---
     if (Test-Path $CsvPath_Dynamic) {
         $Data = Import-Csv $CsvPath_Dynamic
         foreach ($Row in $Data) {
-            if (-not [string]::IsNullOrWhiteSpace($Row.TargetName)) {
+            if (!([string]::IsNullOrWhiteSpace($Row.TargetName))) {
                 $Link = '"[[{0}]]"' -f $Row.TargetName
                 if ($DownList -notcontains $Link) { $DownList += $Link }
             }
         }
     }
 
-    # --- Process CHARACTERISTICS ---
-    # These might be better as Tags, but if you want them in 'down', keep them here.
+    # --- 1C. Process CHARACTERISTICS CSV ---
     if (Test-Path $CsvPath_Chars) {
         $Data = Import-Csv $CsvPath_Chars
         foreach ($Row in $Data) {
-            if (-not [string]::IsNullOrWhiteSpace($Row.TargetName)) {
-                # Optional: Prefix with "Feature: " or just link to the flag note
-                $Link = '"[[{0}]]"' -f $Row.TargetName 
+            if (!([string]::IsNullOrWhiteSpace($Row.TargetName))) {
+                $Link = '"[[{0}]]"' -f $Row.TargetName
                 if ($DownList -notcontains $Link) { $DownList += $Link }
             }
         }
     }
 
     # =========================================================
-    # 3. DETERMINE DESTINATION
+    # 2. FILE CREATION
     # =========================================================
+    
+    # Determine Target Folder based on Type
     $TargetFolder = $TypeMap[$ObjectType]
     if (-not $TargetFolder) { $TargetFolder = "others" }
     
+    # Ensure Folder Exists in Parent Root
     $FullFolderPath = Join-Path $VaultRoot $TargetFolder
     if (-not (Test-Path $FullFolderPath)) { 
         New-Item -ItemType Directory -Force -Path $FullFolderPath | Out-Null 
     }
 
-    # =========================================================
-    # 4. BUILD MARKDOWN CONTENT
-    # =========================================================
-    $CleanType = $TargetFolder -replace "s$", "" # stored procedures -> stored procedure
-
+    # Build File Content
+    $CleanType = $TargetFolder.TrimEnd('s') # e.g. "tables" -> "table"
+    
     $Content = @()
     $Content += "---"
     $Content += "type: $CleanType"
     
     if ($DownList.Count -gt 0) {
         $Content += "down:"
-        # Sort links alphabetically for neatness
-        foreach ($Link in ($DownList | Sort-Object)) {
+        $SortedLinks = $DownList | Sort-Object
+        foreach ($Link in $SortedLinks) {
             $Content += "  - $Link"
         }
     } else {
@@ -115,17 +108,9 @@ foreach ($Folder in $DataFolders) {
     $Content += 'await dv.view("_scripts/dependencies")'
     $Content += "```"
 
-# ... inside the foreach loop ...
-
-    # =========================================================
-    # 5. WRITE FILE
-    # =========================================================
-    
-    # Sanitize Filename: Allow only alphanumeric, spaces, dots, dashes, underscores
-    $SafeName = $ProcName -replace '[^a-zA-Z0-9\s\.\-_]', '_'
-    
-    $FilePath = Join-Path $FullFolderPath "$SafeName.md"
+    # Write File - Assuming ProcName is a valid filename
+    $FilePath = Join-Path $FullFolderPath "$ProcName.md"
     
     Set-Content -Path $FilePath -Value ($Content -join "`n") -Encoding UTF8
-    Write-Host " -> OK ($SafeName.md)" -ForegroundColor Green
+    Write-Host "Created: $ProcName.md" -ForegroundColor Green
 }
