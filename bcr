@@ -1,0 +1,18 @@
+{
+  "username": "jdoe_legacy",
+  "enabled": true,
+  "email": "jdoe@example.com",
+  "firstName": "John",
+  "lastName": "Doe",
+  "emailVerified": true,
+  "credentials": [
+    {
+      "type": "password",
+      "secretData": "{\"value\":\"pn3JT2UIWJGssblppMumX8tMi.1NHhu\",\"salt\":\"rufapytA4RYeK6btrtbH7o\"}",
+      "credentialData": "{\"algorithm\":\"bcrypt\",\"hashIterations\":13}"
+    }
+  ],
+  "realmRoles": [
+    "user"
+  ]
+}
