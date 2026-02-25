@@ -1,0 +1,49 @@
+<?php
+session_start();
+
+// --- CONFIGURATION ---
+$keycloak_url = "https://<your-keycloak-domain>/realms/<your-realm>";
+$client_id = "<your-client-id>";
+$redirect_uri = "http://localhost:8000/callback.php";
+// ---------------------
+
+$verifier = bin2hex(random_bytes(32));
+$_SESSION['code_verifier'] = $verifier;
+
+$hash = hash('sha256', $verifier, true);
+$challenge = rtrim(strtr(base64_encode($hash), '+/', '-_'), '=');
+
+$par_endpoint = $keycloak_url . "/protocol/openid-connect/ext/par/request";
+
+$post_data = http_build_query([
+    'client_id' => $client_id,
+    'response_type' => 'code',
+    'scope' => 'openid profile email',
+    'redirect_uri' => $redirect_uri,
+    'code_challenge' => $challenge,
+    'code_challenge_method' => 'S256'
+]);
+
+$ch = curl_init($par_endpoint);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+// Bypass SSL verification for local Windows testing (Do not use in production!)
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
+
+$response = curl_exec($ch);
+$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+if ($http_code !== 201) {
+    die("PAR Request Failed. HTTP $http_code. Response: $response");
+}
+
+$par_data = json_decode($response, true);
+$request_uri = $par_data['request_uri'];
+
+$auth_endpoint = $keycloak_url . "/protocol/openid-connect/auth";
+$redirect_url = $auth_endpoint . "?client_id=" . urlencode($client_id) . "&request_uri=" . urlencode($request_uri);
+
+header("Location: " . $redirect_url);
+exit;
