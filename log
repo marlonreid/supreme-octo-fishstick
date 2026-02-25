@@ -1,26 +1,31 @@
 <?php
 session_start();
 
-// --- CONFIGURATION ---
-$keycloak_url = "https://<your-keycloak-domain>/realms/<your-realm>";
-$client_id = "<your-client-id>";
-$redirect_uri = "http://localhost:8000/callback.php";
-// ---------------------
+// --- 1. CONFIGURATION ---
+// Tell the integrator to replace these with the actual values you give them
+$keycloak_url  = "https://<your-keycloak-domain>/realms/<your-realm>";
+$client_id     = "<your-client-id>";
+$client_secret = "<your-client-secret>"; // <-- NEW: The Confidential Secret
+$redirect_uri  = "http://localhost:8000/callback.php";
+// ------------------------
 
+// 2. Generate PKCE Verifier and Challenge
 $verifier = bin2hex(random_bytes(32));
-$_SESSION['code_verifier'] = $verifier;
+$_SESSION['code_verifier'] = $verifier; // Save for the callback!
 
 $hash = hash('sha256', $verifier, true);
 $challenge = rtrim(strtr(base64_encode($hash), '+/', '-_'), '=');
 
+// 3. The PAR Request (Server-to-Server Push)
 $par_endpoint = $keycloak_url . "/protocol/openid-connect/ext/par/request";
 
 $post_data = http_build_query([
-    'client_id' => $client_id,
-    'response_type' => 'code',
-    'scope' => 'openid profile email',
-    'redirect_uri' => $redirect_uri,
-    'code_challenge' => $challenge,
+    'client_id'             => $client_id,
+    'client_secret'         => $client_secret, // Authenticates the Client to Keycloak
+    'response_type'         => 'code',
+    'scope'                 => 'openid profile email',
+    'redirect_uri'          => $redirect_uri,
+    'code_challenge'        => $challenge,
     'code_challenge_method' => 'S256'
 ]);
 
@@ -28,7 +33,7 @@ $ch = curl_init($par_endpoint);
 curl_setopt($ch, CURLOPT_POST, true);
 curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-// Bypass SSL verification for local Windows testing (Do not use in production!)
+// NOTE: Set to false ONLY for local Windows testing without proper certs
 curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
 
 $response = curl_exec($ch);
@@ -42,6 +47,8 @@ if ($http_code !== 201) {
 $par_data = json_decode($response, true);
 $request_uri = $par_data['request_uri'];
 
+// 4. The Browser Redirect (User Login)
+// NOTICE: The client_secret is NOT in this URL!
 $auth_endpoint = $keycloak_url . "/protocol/openid-connect/auth";
 $redirect_url = $auth_endpoint . "?client_id=" . urlencode($client_id) . "&request_uri=" . urlencode($request_uri);
 
