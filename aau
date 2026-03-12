@@ -1,0 +1,134 @@
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.IO;
+using System.Text;
+using Microsoft.Data.SqlClient;
+
+namespace AzureSqlAutomation
+{
+    class Program
+    {
+        // TODO: Update these variables with your actual server and database names
+        private static readonly string ServerName = "your-server.database.windows.net";
+        private static readonly string DatabaseName = "your-database";
+        
+        // Active Directory Interactive pops up a Microsoft login prompt (supports MFA)
+        private static readonly string ConnectionString = 
+            $"Server=tcp:{ServerName},1433;Initial Catalog={DatabaseName};Encrypt=True;TrustServerCertificate=False;Authentication=Active Directory Interactive;";
+
+        static void Main(string[] args)
+        {
+            // TODO: Provide your output paths
+            string procCsvPath = @"C:\temp\StoredProcedures_Results.csv";
+            string funcCsvPath = @"C:\temp\Functions_Results.csv";
+
+            // TODO: Provide the custom query you want to run for each object.
+            // Use @ObjectName as the parameter placeholder in your SQL.
+            string customQuery = "SELECT definition FROM sys.sql_modules WHERE object_id = OBJECT_ID(@ObjectName)";
+
+            try
+            {
+                Console.WriteLine("Connecting to Azure SQL...");
+
+                // 1. Process Stored Procedures
+                Console.WriteLine("Fetching Stored Procedures...");
+                string getProcsQuery = @"
+                    SELECT s.name + '.' + p.name AS ObjectName 
+                    FROM sys.procedures p 
+                    JOIN sys.schemas s ON p.schema_id = s.schema_id";
+                
+                ProcessObjects(getProcsQuery, customQuery, procCsvPath);
+                Console.WriteLine($"Stored Procedures processed. Results saved to {procCsvPath}");
+
+                // 2. Process Functions (Scalar, Inline Table-Valued, Multi-Statement Table-Valued)
+                Console.WriteLine("Fetching Functions...");
+                string getFuncsQuery = @"
+                    SELECT s.name + '.' + o.name AS ObjectName 
+                    FROM sys.objects o 
+                    JOIN sys.schemas s ON o.schema_id = s.schema_id 
+                    WHERE o.type IN ('FN', 'IF', 'TF')";
+
+                ProcessObjects(getFuncsQuery, customQuery, funcCsvPath);
+                Console.WriteLine($"Functions processed. Results saved to {funcCsvPath}");
+
+                Console.WriteLine("Process complete!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"An error occurred: {ex.Message}");
+            }
+        }
+
+        static void ProcessObjects(string getObjectsQuery, string customQuery, string outputPath)
+        {
+            var results = new List<string>();
+            var objectNames = new List<string>();
+
+            using (SqlConnection conn = new SqlConnection(ConnectionString))
+            {
+                conn.Open();
+
+                // Step 1: Get list of objects
+                using (SqlCommand cmd = new SqlCommand(getObjectsQuery, conn))
+                using (SqlDataReader reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        objectNames.Add(reader["ObjectName"].ToString());
+                    }
+                }
+
+                // Step 2: Run custom query for each object
+                foreach (var objName in objectNames)
+                {
+                    using (SqlCommand customCmd = new SqlCommand(customQuery, conn))
+                    {
+                        // Add the object name as a parameter to avoid SQL injection and syntax errors
+                        customCmd.Parameters.AddWithValue("@ObjectName", objName);
+
+                        using (SqlDataReader customReader = customCmd.ExecuteReader())
+                        {
+                            // If it's the first run, let's grab the column headers for the CSV
+                            if (results.Count == 0 && customReader.FieldCount > 0)
+                            {
+                                var headers = new List<string> { "TargetObject" }; // Keep track of which proc/func we queried
+                                for (int i = 0; i < customReader.FieldCount; i++)
+                                {
+                                    headers.Add(EscapeCsv(customReader.GetName(i)));
+                                }
+                                results.Add(string.Join(",", headers));
+                            }
+
+                            // Read the results of your custom query
+                            while (customReader.Read())
+                            {
+                                var row = new List<string> { EscapeCsv(objName) };
+                                for (int i = 0; i < customReader.FieldCount; i++)
+                                {
+                                    row.Add(EscapeCsv(customReader[i]?.ToString() ?? ""));
+                                }
+                                results.Add(string.Join(",", row));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Step 3: Write out to CSV
+            File.WriteAllLines(outputPath, results, Encoding.UTF8);
+        }
+
+        // Helper method to safely format strings for CSV
+        static string EscapeCsv(string field)
+        {
+            if (string.IsNullOrEmpty(field)) return "";
+            
+            if (field.Contains(",") || field.Contains("\"") || field.Contains("\n") || field.Contains("\r"))
+            {
+                return $"\"{field.Replace("\"", "\"\"")}\"";
+            }
+            return field;
+        }
+    }
+}
