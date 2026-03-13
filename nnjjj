@@ -1,0 +1,106 @@
+SYSTEM PROMPT
+You are an expert software engineer helping size user stories for a PHP-based
+educational platform (similar to Moodle or a school assessment system).
+
+You will be given:
+1. A user story — written by a teacher, school admin, or student (NOT a developer)
+2. PHP files this story will likely touch, with semantic similarity scores
+3. Historical issues that touched similar files, weighted by recency
+
+The story language will be non-technical. Your job is to translate it into
+a complexity estimate, using the historical issues as calibration anchors.
+
+IMPORTANT: Historical issues are pre-filtered and recency-weighted.
+Older issues touching stale files have been down-weighted or excluded.
+If comparators are sparse or old, lower your confidence accordingly.
+
+Complexity buckets:
+  trivial    = less than 1 day   (tiny, no unknowns, 1-2 files)
+  small      = 1-3 days          (well understood, targeted change)
+  medium     = 3-6 days          (some complexity, multiple files or unknowns)
+  large      = 1-2 weeks         (significant complexity, many files or risk)
+  very_large = 2+ weeks          (major feature, cross-cutting, many unknowns)
+
+Respond in valid JSON only. No preamble, no markdown fences.
+
+{
+  "complexity_bucket": "medium",
+  "optimistic_days": 3,
+  "realistic_days": 5,
+  "pessimistic_days": 9,
+  "confidence": "medium",
+  "most_similar_issue": "MDL-12345 — brief description of why it's similar",
+  "rationale": "Concise explanation anchored to the historical comparators",
+  "risk_factors": ["What could make this larger than estimated"],
+  "what_keeps_it_small": "What must be true for the optimistic case to hold"
+}
+
+USER MESSAGE
+Story (written by a non-developer):
+"""Students may get a 'TypeError' dialog when self-completing a course.
+
+When a student clicks 'Mark as complete' on a course that uses the
+self-completion method, they sometimes see a JavaScript error dialog
+appear before the page refreshes. The completion still saves correctly,
+but the error is confusing and students think something went wrong.
+This seems to happen more on courses with a lot of activities."""
+
+Files this story will likely touch:
+  - completion/classes/cm_completion_details.php (similarity: 0.71)
+  - completion/renderer.php (similarity: 0.68)
+  - completion/classes/completion_factory.php (similarity: 0.61)
+  - lib/amd/src/completion.js (similarity: 0.43)
+
+Historical issues (weighted by recency):
+MDL-85901 [Bug]: Self-completion block not refreshing page state after mark
+Complexity: small (score: 7)
+Signals: 2 files, 34 lines, 2 commits, 1 days, 4 discussion comments
+Relevance: 2 matching files | recency: recent
+---
+MDL-84412 [Bug]: Course completion status not updating for manual completion
+Complexity: small (score: 8)
+Signals: 3 files, 58 lines, 2 commits, 3 days, 6 discussion comments
+Relevance: 2 matching files | recency: recent
+---
+MDL-81773 [Improvement]: Completion condition display inconsistent on course page
+Complexity: medium (score: 11)
+Signals: 4 files, 112 lines, 3 commits, 7 days, 9 discussion comments
+Relevance: 1 matching file | recency: older
+---
+MDL-79654 [Bug]: TypeError thrown in completion renderer when activity count is null
+Complexity: small (score: 6)
+Signals: 1 files, 12 lines, 1 commits, 0 days, 2 discussion comments
+Relevance: 1 matching file | recency: older
+---
+MDL-77203 [Bug]: Self-completion does not fire completion event for gradebook
+Complexity: small (score: 9)
+Signals: 3 files, 71 lines, 2 commits, 2 days, 5 discussion comments
+Relevance: 1 matching file | recency: old
+---
+
+Predict the complexity of this story. JSON only.
+
+CLAUDE'S RESPONSE
+json{
+  "complexity_bucket": "small",
+  "optimistic_days": 1,
+  "realistic_days": 2,
+  "pessimistic_days": 4,
+  "confidence": "high",
+  "most_similar_issue": "MDL-79654 — near-identical pattern: TypeError in completion
+      renderer, single-file fix, zero span days",
+  "rationale": "Three recent comparators (MDL-85901, MDL-84412, MDL-79654) all
+      sit in the small bucket with 1-3 files changed and 1-3 days span. The
+      TypeError pattern in MDL-79654 is particularly close — a null-guard missing
+      in the renderer. The JavaScript error appearing before page refresh suggests
+      a timing issue in lib/amd/src/completion.js or a missing null check in
+      cm_completion_details.php. Neither is architecturally complex.",
+  "risk_factors": [
+    "If the root cause is in the activity count logic rather than the renderer,
+     scope could expand to include grade-related completion classes",
+    "Intermittent reproduction ('sometimes') may add investigation time"
+  ],
+  "what_keeps_it_small": "Root cause is a missing null check or a race condition
+      in the existing completion JS — a pattern seen in MDL-79654 and resolvable
+      in a single file without touching the completion event pipeline"
+}
