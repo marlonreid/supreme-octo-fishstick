@@ -1,0 +1,31 @@
+// 1. Convert the raw PDF bytes into a Base64 string so JavaScript can read it
+string base64Pdf = Convert.ToBase64String(pdfBytes);
+
+// 2. Load the PDF.js HTML template into your active Playwright page
+string pdfJsHtml = GetPdfJsHtmlTemplate(); 
+await page.SetContentAsync(pdfJsHtml);
+
+// 3. Inject the Base64 string into the JavaScript function and set the scale (3.0 for high fidelity)
+await page.EvaluateAsync($"renderPdf('{base64Pdf}', 3.0)");
+
+// 4. Wait for JavaScript to finish painting all the canvases 
+// (It sets a custom data attribute on the body when done)
+await page.WaitForSelectorAsync("body[data-pdf-loaded='true']", new PageWaitForSelectorOptions { Timeout = 60000 });
+
+// 5. Find every canvas element that was generated
+var images = new List<byte[]>();
+var canvases = await page.Locator("canvas.pdf-page").AllAsync();
+
+// 6. Take a screenshot of each canvas and store it
+foreach (var canvas in canvases)
+{
+    var imageBytes = await canvas.ScreenshotAsync(new LocatorScreenshotOptions 
+    { 
+        Type = ScreenshotType.Png,
+        OmitBackground = false // Keeps the background white
+    });
+    images.Add(imageBytes);
+}
+
+// Done. You now have a list of high-fidelity PNG byte arrays.
+return images;
