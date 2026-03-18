@@ -1,0 +1,62 @@
+private string GetPdfJsHtmlTemplate()
+{
+    return @"
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body { margin: 0; padding: 0; background-color: #ffffff; }
+            /* Adds a small gap between canvases just to keep the DOM clean */
+            .pdf-page { display: block; margin-bottom: 10px; background-color: white; } 
+        </style>
+        <script src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'></script>
+        <script>
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            
+            async function renderPdf(base64Data, scaleFactor) {
+                // Decode Base64 back to binary
+                const binaryString = window.atob(base64Data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                
+                // Load the PDF with high-fidelity font mappings
+                const loadingTask = pdfjsLib.getDocument({
+                    data: bytes,
+                    cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+                    cMapPacked: true,
+                    standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/'
+                });
+                
+                const pdf = await loadingTask.promise;
+                
+                // Loop through and paint each page
+                for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+                    const page = await pdf.getPage(pageNum);
+                    const viewport = page.getViewport({ scale: scaleFactor }); 
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'pdf-page';
+                    const context = canvas.getContext('2d');
+                    
+                    canvas.height = viewport.height;
+                    canvas.width = viewport.width;
+                    document.body.appendChild(canvas);
+                    
+                    const renderContext = {
+                        canvasContext: context,
+                        viewport: viewport,
+                        intent: 'print'
+                    };
+                    
+                    await page.render(renderContext).promise;
+                }
+                // Signal to Playwright that we are done
+                document.body.setAttribute('data-pdf-loaded', 'true');
+            }
+        </script>
+    </head>
+    <body></body>
+    </html>";
+}
