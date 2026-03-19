@@ -3,117 +3,81 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.Playwright;
 
-public class HtmlToPagedImageConverter : IAsyncDisposable
+public async IAsyncEnumerable<byte[]> ConvertToPaddedSmartPagesAsync(IBrowserContext context, string htmlContent, string baseUrl)
 {
-    private IPlaywright _playwright;
-    private IBrowser _browser;
+    var mainPage = await context.NewPageAsync();
+    // Create a second "Stamper" page specifically for padding the images
+    var paddingPage = await context.NewPageAsync();
 
-    public async Task InitializeAsync()
+    try
     {
-        _playwright = await Playwright.CreateAsync();
+        int pageWidth = 794;  
+        int targetPageHeight = 1123; 
         
-        // Launch with security disabled so about:blank can download your CSS/Images
-        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions 
-        { 
-            Headless = true,
-            Args = new[] { "--disable-web-security", "--disable-features=IsolateOrigins,site-per-process" } 
-        });
-    }
+        await mainPage.SetViewportSizeAsync(pageWidth, targetPageHeight);
+        await paddingPage.SetViewportSizeAsync(pageWidth, targetPageHeight);
 
-    public async IAsyncEnumerable<byte[]> ConvertHtmlToPagesAsync(string htmlContent, string baseUrl)
-    {
-        // 1. Create a fresh context with JS enabled and a standard desktop mask
-        await using var context = await _browser.NewContextAsync(new BrowserNewContextOptions
+        // Load your HTML flawlessly into the main page
+        string fixedHtml = $"<base href='{baseUrl}'>\n" + htmlContent;
+        await mainPage.SetContentAsync(fixedHtml, new PageSetContentOptions { WaitUntil = WaitUntilState.NetworkIdle });
+
+        int totalHeight = await mainPage.EvaluateAsync<int>("document.documentElement.scrollHeight");
+        int currentY = 0;
+
+        while (currentY < totalHeight)
         {
-            JavaScriptEnabled = true,
-            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        });
+            // 1. Calculate the safe cut-line (same as before)
+            int captureHeight = await mainPage.EvaluateAsync<int>(@"([currentY, maxCaptureHeight]) => {
+                let safeBottomY = currentY + maxCaptureHeight;
+                const elements = document.querySelectorAll('p, input, select, textarea, label, img, table, tr, button, .radio-group, h1, h2, h3');
+                
+                for (const el of elements) {
+                    const rect = el.getBoundingClientRect();
+                    const absoluteTop = currentY + rect.top;
+                    const absoluteBottom = currentY + rect.bottom;
 
-        var page = await context.NewPageAsync();
+                    if (absoluteTop < safeBottomY && absoluteBottom > safeBottomY) {
+                        safeBottomY = absoluteTop - 5; 
+                    }
+                }
+                return Math.max(100, safeBottomY - currentY);
+            }", new[] { currentY, Math.Min(targetPageHeight, totalHeight - currentY) });
 
-        // 2. Define the exact dimensions of your "Page" (A4 at 96 DPI used here)
-        int pageWidth = 794;
-        int pageHeight = 1123;
-        await page.SetViewportSizeAsync(pageWidth, pageHeight);
-
-        try
-        {
-            // 3. Inject the Base tag so relative paths (../../) work perfectly
-            string fixedHtml = $"<base href='{baseUrl}'>\n" + htmlContent;
-            
-            // 4. Load the page and wait for the network to finish grabbing images/CSS
-            await page.SetContentAsync(fixedHtml, new PageSetContentOptions { WaitUntil = WaitUntilState.NetworkIdle });
-
-            // 5. INJECT THE E-BOOK PAGINATION CSS
-            await page.AddStyleTagAsync(new PageAddStyleTagOptions 
-            { 
-                Content = $@"
-                    /* Lock the body to exactly one page high */
-                    html, body {{
-                        margin: 0 !important;
-                        padding: 0 !important;
-                        height: {pageHeight}px !important; 
-                        box-sizing: border-box;
-                    }}
-                    
-                    /* Force content to flow left-to-right into new columns instead of scrolling down */
-                    body {{
-                        column-width: {pageWidth}px;
-                        column-gap: 0px;
-                        column-fill: auto;
-                        overflow-x: hidden; 
-                        overflow-y: hidden;
-                    }}
-                    
-                    /* The Magic Rule: Tell the browser NEVER to slice these elements across columns */
-                    p, div, img, table, tr, td, ul, li, input, select, textarea, label, fieldset, legend {{
-                        break-inside: avoid !important;
-                        page-break-inside: avoid !important;
-                    }}
-                    
-                    /* Hide scrollbars just in case they try to render */
-                    ::-webkit-scrollbar {{ display: none; }}
-                " 
+            // 2. Take the raw (potentially short) screenshot
+            var imageBytes = await mainPage.ScreenshotAsync(new PageScreenshotOptions
+            {
+                Type = ScreenshotType.Png,
+                Clip = new Clip { X = 0, Y = currentY, Width = pageWidth, Height = captureHeight }
             });
 
-            // Give the browser's layout engine a moment to mathematically reflow the columns
-            await page.WaitForTimeoutAsync(500);
-
-            // 6. Calculate how many pages (columns) were generated
-            int scrollWidth = await page.EvaluateAsync<int>("document.body.scrollWidth");
-            int totalPages = (int)Math.Ceiling((double)scrollWidth / pageWidth);
-
-            // Safety catch: If it's empty, still return at least one blank page
-            if (totalPages == 0) totalPages = 1;
-
-            // 7. Snap the screenshots
-            for (int i = 0; i < totalPages; i++)
+            // 3. THE PADDING STEP: If the image is shorter than our target page height, pad it with white space
+            if (captureHeight < targetPageHeight)
             {
-                // Scroll horizontally to frame the exact column we want to capture
-                await page.EvaluateAsync($"window.scrollTo({i * pageWidth}, 0)");
+                // Convert the short image to Base64
+                string base64Image = Convert.ToBase64String(imageBytes);
                 
-                // Tiny pause to ensure the GPU paints the newly scrolled area
-                await page.WaitForTimeoutAsync(100);
+                // Inject it into our locked 1123px high Stamper page
+                await paddingPage.SetContentAsync($@"
+                    <style>
+                        body {{ margin: 0; padding: 0; background-color: white; }}
+                        img {{ display: block; vertical-align: top; }}
+                    </style>
+                    <img src='data:image/png;base64,{base64Image}' />
+                ");
 
-                // Take a screenshot of the visible viewport
-                var imageBytes = await page.ScreenshotAsync(new PageScreenshotOptions
-                {
-                    Type = ScreenshotType.Png
-                });
-
-                yield return imageBytes;
+                // Take a screenshot of the padded page. It will be exactly 794x1123 every time.
+                imageBytes = await paddingPage.ScreenshotAsync(new PageScreenshotOptions { Type = ScreenshotType.Png });
             }
-        }
-        finally
-        {
-            // Always close the page to prevent memory leaks
-            await page.CloseAsync();
+
+            // Yield the final, perfectly sized, perfect fidelity image
+            yield return imageBytes;
+
+            currentY += captureHeight;
         }
     }
-
-    public async ValueTask DisposeAsync()
+    finally
     {
-        if (_browser != null) await _browser.DisposeAsync();
-        _playwright?.Dispose();
+        await mainPage.CloseAsync();
+        await paddingPage.CloseAsync();
     }
 }
