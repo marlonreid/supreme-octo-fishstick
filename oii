@@ -1,39 +1,69 @@
-int captureHeight = await mainPage.EvaluateAsync<int>(@"([currentY, maxCaptureHeight]) => {
-    let safeBottomY = currentY + maxCaptureHeight;
-    const originalSafeBottom = safeBottomY;
-    
-    // Grab elements. Note: Removed generic wrapper classes like .radio-group if they are massive.
-    // We only care about slicing the actual text or the actual input buttons.
-    const elements = document.querySelectorAll('p, input, select, textarea, label, img, table, tr, button, h1, h2, h3, h4, span');
-    
-    for (const el of elements) {
-        const rect = el.getBoundingClientRect();
-        
-        // Since we aren't physically scrolling the window, rect.top + window.scrollY gives us the true, fixed absolute Y coordinate.
-        const absoluteTop = rect.top + window.scrollY;
-        const absoluteBottom = rect.bottom + window.scrollY;
+// 1. Load the HTML flawlessly
+string fixedHtml = $"<base href='{baseUrl}'>\n" + htmlContent;
+await mainPage.SetContentAsync(fixedHtml, new PageSetContentOptions { WaitUntil = WaitUntilState.NetworkIdle });
+await mainPage.EvaluateAsync("() => document.fonts.ready");
 
-        // Does the proposed cut-line slice directly through this element?
-        if (absoluteTop < safeBottomY && absoluteBottom > safeBottomY) {
+// 2. THE FIX: Find out how massive the document is, and stretch the Viewport to match it.
+// This forces every single element to render perfectly, and makes our Clip math 100% absolute.
+int initialHeight = await mainPage.EvaluateAsync<int>("document.documentElement.scrollHeight");
+await mainPage.SetViewportSizeAsync(pageWidth, initialHeight);
+
+// Re-measure just in case stretching the viewport reflowed some text
+int totalHeight = await mainPage.EvaluateAsync<int>("document.documentElement.scrollHeight");
+int currentY = 0;
+
+while (currentY < totalHeight)
+{
+    // 3. The Raycaster (Simplified because the entire document is now on-screen)
+    int captureHeight = await mainPage.EvaluateAsync<int>(@"([currentY, maxCaptureHeight]) => {
+        let safeBottomY = currentY + maxCaptureHeight;
+        
+        // Grab the elements that matter
+        const elements = document.querySelectorAll('p, input, select, textarea, label, img, table, tr, button, h1, h2, h3, h4, span');
+        
+        for (const el of elements) {
+            const rect = el.getBoundingClientRect();
             
-            // CRITICAL CHECK: Does this element actually start on the CURRENT page?
-            // If it started on a previous page (absoluteTop < currentY), it is a massive element 
-            // and we are forced to slice it. 
-            if (absoluteTop >= currentY) {
-                // It starts on this page, so we can safely push the cut-line up to save it!
-                safeBottomY = absoluteTop - 5; 
+            // Because the viewport is the size of the whole document, rect.top IS the absolute Y coordinate.
+            const absoluteTop = rect.top; 
+            const absoluteBottom = rect.bottom;
+
+            // Does the cut-line slice this element?
+            if (absoluteTop < safeBottomY && absoluteBottom > safeBottomY) {
+                // Ensure we don't push the cut-line backwards into a previous page
+                if (absoluteTop > currentY) {
+                    safeBottomY = absoluteTop - 5; 
+                }
             }
         }
-    }
-    
-    let calculatedHeight = safeBottomY - currentY;
+        
+        return Math.max(100, safeBottomY - currentY);
+    }", new[] { currentY, Math.Min(targetPageHeight, totalHeight - currentY) });
 
-    // FAILSAFE: If a cluster of elements pushed our cut-line up so high that we are making 
-    // zero progress (e.g. less than 100px), just force the cut at the max height to prevent infinite loops.
-    if (calculatedHeight < 100) {
-        return maxCaptureHeight;
+    // 4. Safety Clamp: Ensure we never ask Playwright to clip outside the document
+    if (currentY + captureHeight > totalHeight) 
+    {
+        captureHeight = totalHeight - currentY;
     }
-    
-    return calculatedHeight;
 
-}", new[] { currentY, Math.Min(targetPageHeight, totalHeight - currentY) });
+    if (captureHeight <= 0) break;
+
+    // 5. Take the screenshot (This will now succeed because the Viewport covers the whole Clip area)
+    var imageBytes = await mainPage.ScreenshotAsync(new PageScreenshotOptions
+    {
+        Type = ScreenshotType.Png,
+        Clip = new Clip 
+        { 
+            X = 0, 
+            Y = currentY, 
+            Width = pageWidth, 
+            Height = captureHeight 
+        }
+    });
+
+    // (If you are using the Padding Page logic, it goes here)
+
+    yield return imageBytes;
+
+    currentY += captureHeight;
+}
