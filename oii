@@ -1,0 +1,119 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.Playwright;
+
+public class HtmlToPagedImageConverter : IAsyncDisposable
+{
+    private IPlaywright _playwright;
+    private IBrowser _browser;
+
+    public async Task InitializeAsync()
+    {
+        _playwright = await Playwright.CreateAsync();
+        
+        // Launch with security disabled so about:blank can download your CSS/Images
+        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions 
+        { 
+            Headless = true,
+            Args = new[] { "--disable-web-security", "--disable-features=IsolateOrigins,site-per-process" } 
+        });
+    }
+
+    public async IAsyncEnumerable<byte[]> ConvertHtmlToPagesAsync(string htmlContent, string baseUrl)
+    {
+        // 1. Create a fresh context with JS enabled and a standard desktop mask
+        await using var context = await _browser.NewContextAsync(new BrowserNewContextOptions
+        {
+            JavaScriptEnabled = true,
+            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        });
+
+        var page = await context.NewPageAsync();
+
+        // 2. Define the exact dimensions of your "Page" (A4 at 96 DPI used here)
+        int pageWidth = 794;
+        int pageHeight = 1123;
+        await page.SetViewportSizeAsync(pageWidth, pageHeight);
+
+        try
+        {
+            // 3. Inject the Base tag so relative paths (../../) work perfectly
+            string fixedHtml = $"<base href='{baseUrl}'>\n" + htmlContent;
+            
+            // 4. Load the page and wait for the network to finish grabbing images/CSS
+            await page.SetContentAsync(fixedHtml, new PageSetContentOptions { WaitUntil = WaitUntilState.NetworkIdle });
+
+            // 5. INJECT THE E-BOOK PAGINATION CSS
+            await page.AddStyleTagAsync(new PageAddStyleTagOptions 
+            { 
+                Content = $@"
+                    /* Lock the body to exactly one page high */
+                    html, body {{
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        height: {pageHeight}px !important; 
+                        box-sizing: border-box;
+                    }}
+                    
+                    /* Force content to flow left-to-right into new columns instead of scrolling down */
+                    body {{
+                        column-width: {pageWidth}px;
+                        column-gap: 0px;
+                        column-fill: auto;
+                        overflow-x: hidden; 
+                        overflow-y: hidden;
+                    }}
+                    
+                    /* The Magic Rule: Tell the browser NEVER to slice these elements across columns */
+                    p, div, img, table, tr, td, ul, li, input, select, textarea, label, fieldset, legend {{
+                        break-inside: avoid !important;
+                        page-break-inside: avoid !important;
+                    }}
+                    
+                    /* Hide scrollbars just in case they try to render */
+                    ::-webkit-scrollbar {{ display: none; }}
+                " 
+            });
+
+            // Give the browser's layout engine a moment to mathematically reflow the columns
+            await page.WaitForTimeoutAsync(500);
+
+            // 6. Calculate how many pages (columns) were generated
+            int scrollWidth = await page.EvaluateAsync<int>("document.body.scrollWidth");
+            int totalPages = (int)Math.Ceiling((double)scrollWidth / pageWidth);
+
+            // Safety catch: If it's empty, still return at least one blank page
+            if (totalPages == 0) totalPages = 1;
+
+            // 7. Snap the screenshots
+            for (int i = 0; i < totalPages; i++)
+            {
+                // Scroll horizontally to frame the exact column we want to capture
+                await page.EvaluateAsync($"window.scrollTo({i * pageWidth}, 0)");
+                
+                // Tiny pause to ensure the GPU paints the newly scrolled area
+                await page.WaitForTimeoutAsync(100);
+
+                // Take a screenshot of the visible viewport
+                var imageBytes = await page.ScreenshotAsync(new PageScreenshotOptions
+                {
+                    Type = ScreenshotType.Png
+                });
+
+                yield return imageBytes;
+            }
+        }
+        finally
+        {
+            // Always close the page to prevent memory leaks
+            await page.CloseAsync();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_browser != null) await _browser.DisposeAsync();
+        _playwright?.Dispose();
+    }
+}
