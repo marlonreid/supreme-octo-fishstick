@@ -1,22 +1,17 @@
 public async IAsyncEnumerable<byte[]> HtmlToPagedImagesAsync(string htmlContent, string baseUrl)
 {
     var page = await _browser.NewPageAsync();
-    
-    try 
+
+    try
     {
-        // 1. Setup - A4 Dimensions at 96 DPI
-        int pageWidth = 794;  
-        int targetHeight = 1123; 
+        int pageWidth = 794;
+        int targetHeight = 1123;
         await page.SetViewportSizeAsync(pageWidth, 800);
 
-        // 2. Load and Wait for Stability
         string fixedHtml = $"<base href='{baseUrl}'>\n" + htmlContent;
         await page.SetContentAsync(fixedHtml, new PageSetContentOptions { WaitUntil = WaitUntilState.NetworkIdle });
-        
-        // Wait for fonts to stabilize layout
         await page.EvaluateAsync("() => document.fonts?.ready");
 
-        // 3. The Scrubber (Forces browser properties to match HTML attributes)
         await page.EvaluateAsync(@"() => {
             document.querySelectorAll('select').forEach(s => {
                 if (!s || !s.options) return;
@@ -31,8 +26,9 @@ public async IAsyncEnumerable<byte[]> HtmlToPagedImagesAsync(string htmlContent,
             }
         }");
 
-        // 4. Calculate Breakpoints (The JavaScript Raycaster)
-        // Note the syntax: we pass 'targetHeight' and receive a List<int>
+        // FIX 1: offsetParent === null incorrectly skips body-level elements.
+        // Use getComputedStyle visibility check instead — it correctly identifies
+        // genuinely hidden elements regardless of DOM position.
         var breakPoints = await page.EvaluateAsync<List<int>>(@"(targetH) => {
             const result = [0];
             let currentY = 0;
@@ -42,60 +38,73 @@ public async IAsyncEnumerable<byte[]> HtmlToPagedImagesAsync(string htmlContent,
                 let idealBreak = currentY + targetH;
                 let safeBreak = idealBreak;
 
-                // Identify elements that might be sliced
                 const elements = document.querySelectorAll('p, input, select, label, img, tr, h1, h2, h3, span, div');
-                
+
                 for (const el of elements) {
-                    // Skip hidden/unrendered elements to prevent NullRefs
-                    if (!el || el.offsetParent === null) continue;
-                    
+                    if (!el) continue;
+
+                    // FIXED: offsetParent check was wrongly skipping top-level elements.
+                    // Check computed visibility instead.
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+
                     const rect = el.getBoundingClientRect();
-                    if (!rect || rect.height === 0) continue;
+                    if (!rect || rect.height === 0 || rect.width === 0) continue;
 
                     const top = rect.top + window.scrollY;
                     const bottom = rect.bottom + window.scrollY;
 
-                    // If slicing this element, move the break up to its top
                     if (top < idealBreak && bottom > idealBreak) {
                         if (top > currentY + 100) {
                             safeBreak = Math.floor(top - 2);
-                            break; // Stop looking for this page once we find a clean break
+                            break;
                         }
                     }
                 }
-                
-                // Safety: If no clean break found, force a standard page height
+
                 if (safeBreak <= currentY) safeBreak = currentY + targetH;
-                
+
                 result.push(safeBreak);
                 currentY = safeBreak;
             }
-            
+
             result.push(totalH);
             return result;
         }", targetHeight);
 
-        // 5. THE MASTER CAPTURE (The only screenshot we take)
+        // FIX 2: EvaluateAsync<List<int>> returns null if JS yields undefined/null.
+        // Fall back to simple uniform paging rather than blowing up.
         byte[] masterBytes = await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
-        
-        // 6. C# IMAGE SLICING (Using SixLabors.ImageSharp)
         using var masterImage = Image.Load<Rgba32>(masterBytes);
+
+        if (breakPoints == null || breakPoints.Count < 2)
+        {
+            breakPoints = new List<int>();
+            int y = 0;
+            while (y < masterImage.Height)
+            {
+                breakPoints.Add(y);
+                y += targetHeight;
+            }
+            breakPoints.Add(masterImage.Height);
+        }
 
         for (int i = 0; i < breakPoints.Count - 1; i++)
         {
             int yStart = breakPoints[i];
             int yEnd = breakPoints[i + 1];
+
+            // FIX 3: Clamp to actual image bounds — the final breakpoint can
+            // exceed masterImage.Height if scrollHeight != rendered pixel height.
+            yStart = Math.Clamp(yStart, 0, masterImage.Height);
+            yEnd = Math.Clamp(yEnd, 0, masterImage.Height);
             int sliceHeight = yEnd - yStart;
 
             if (sliceHeight <= 0) continue;
 
-            // Define the crop area based on our master image
             var cropArea = new Rectangle(0, yStart, masterImage.Width, sliceHeight);
-            
-            // Slice the static image
-            using var slice = masterImage.Clone(ctx => ctx.Crop(cropArea));
 
-            // Create the white A4 padded canvas
+            using var slice = masterImage.Clone(ctx => ctx.Crop(cropArea));
             using var canvas = new Image<Rgba32>(pageWidth, targetHeight);
             canvas.Mutate(ctx => {
                 ctx.BackgroundColor(Color.White);
@@ -107,7 +116,7 @@ public async IAsyncEnumerable<byte[]> HtmlToPagedImagesAsync(string htmlContent,
             yield return ms.ToArray();
         }
     }
-    finally 
+    finally
     {
         await page.CloseAsync();
     }
