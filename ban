@@ -1,0 +1,119 @@
+using Microsoft.Playwright;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+
+public class PerfectFidelityRenderer : IAsyncDisposable
+{
+    private IPlaywright _playwright;
+    private IBrowser _browser;
+
+    public async Task InitializeAsync()
+    {
+        _playwright = await Playwright.CreateAsync();
+        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { 
+            Headless = true,
+            Args = new[] { "--disable-web-security" } 
+        });
+    }
+
+    public async IAsyncEnumerable<byte[]> HtmlToPagedImagesAsync(string htmlContent, string baseUrl)
+    {
+        var page = await _browser.NewPageAsync();
+        
+        // 1. Setup Environment
+        int pageWidth = 794;  // A4 Width at 96 DPI
+        int targetHeight = 1123; // A4 Height at 96 DPI
+        await page.SetViewportSizeAsync(pageWidth, 800);
+
+        // 2. Load Content
+        string fixedHtml = $"<base href='{baseUrl}'>\n" + htmlContent;
+        await page.SetContentAsync(fixedHtml, new PageSetContentOptions { WaitUntil = WaitUntilState.NetworkIdle });
+        await page.EvaluateAsync("() => document.fonts.ready");
+
+        // 3. Neutralize Browser "Helpfulness" (Stop auto-filling dropdowns/radios not in HTML)
+        await page.EvaluateAsync(@"() => {
+            document.querySelectorAll('select').forEach(s => {
+                if (!Array.from(s.options).some(o => o.hasAttribute('selected'))) s.selectedIndex = -1;
+            });
+            document.querySelectorAll('input[type=""radio""], input[type=""checkbox""]').forEach(i => {
+                i.checked = i.hasAttribute('checked');
+            });
+            // Stop orange focus rings from appearing in the screenshot
+            if (document.activeElement) document.activeElement.blur();
+        }");
+
+        // 4. Calculate All "Safe" Breakpoints via DOM Analysis
+        // We do this while the DOM is live so we know exactly where the text is.
+        var breakPoints = await page.EvaluateAsync<List<int>>(@"([targetH]) => {
+            const points = [0];
+            let currentY = 0;
+            const totalH = document.documentElement.scrollHeight;
+
+            while (currentY + targetH < totalH) {
+                let idealBreak = currentY + targetH;
+                let safeBreak = idealBreak;
+
+                // Find elements crossing the 1123px line
+                const elements = document.querySelectorAll('p, input, select, label, img, tr, h1, h2, h3, span');
+                for (const el of elements) {
+                    const rect = el.getBoundingClientRect();
+                    const top = rect.top + window.scrollY;
+                    const bottom = rect.bottom + window.scrollY;
+
+                    if (top < idealBreak && bottom > idealBreak) {
+                        // If it's not a massive element, push the break to its top
+                        if (top > currentY + 100) {
+                            safeBreak = Math.floor(top - 5);
+                        }
+                    }
+                }
+                points.push(safeBreak);
+                currentY = safeBreak;
+            }
+            points.push(totalH);
+            return points;
+        }", new[] { targetHeight });
+
+        // 5. Take ONE Master Full-Page Screenshot
+        // This is the source of truth for fidelity.
+        byte[] masterBytes = await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true, Type = ScreenshotType.Png });
+        await page.CloseAsync();
+
+        // 6. Slice and Pad in C# Memory (Zero Browser Involvement)
+        using var masterImage = Image.Load<Rgba32>(masterBytes);
+
+        for (int i = 0; i < breakPoints.Count - 1; i++)
+        {
+            int yStart = breakPoints[i];
+            int yEnd = breakPoints[i + 1];
+            int sliceHeight = yEnd - yStart;
+
+            // Crop the chunk from the master image
+            var cropArea = new Rectangle(0, yStart, pageWidth, sliceHeight);
+            using var slice = masterImage.Clone(ctx => ctx.Crop(cropArea));
+
+            // Create a perfectly sized white A4 canvas
+            using var canvas = new Image<Rgba32>(pageWidth, targetHeight);
+            canvas.Mutate(ctx => {
+                ctx.BackgroundColor(Color.White);
+                ctx.DrawImage(slice, new Point(0, 0), 1f);
+            });
+
+            using var ms = new MemoryStream();
+            await canvas.SaveAsPngAsync(ms);
+            yield return ms.ToArray();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_browser != null) await _browser.DisposeAsync();
+        _playwright?.Dispose();
+    }
+}
