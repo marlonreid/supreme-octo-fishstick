@@ -1,63 +1,230 @@
-var result = await page.EvaluateAsync<JsonElement>(@"(targetH) => {
-    try {
-        const result = [0];
-        let currentY = 0;
-        const totalH = document.documentElement.scrollHeight;
+using System.Collections.Concurrent;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Playwright;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
-        while (currentY + targetH < totalH) {
-            let idealBreak = currentY + targetH;
-            let safeBreak = idealBreak;
+public sealed class PlaywrightRenderer : IAsyncDisposable
+{
+    private const int PageWidth    = 794;
+    private const int PageHeight   = 1123;
+    private const int LocalPort    = 5099;
 
-            const elements = document.querySelectorAll('p, input, select, label, img, tr, h1, h2, h3, span, div');
+    private readonly IPlaywright                        _playwright;
+    private readonly IBrowser                           _browser;
+    private readonly WebApplication                     _app;
+    private readonly HttpClient                         _httpClient;
+    private readonly ConcurrentDictionary<string, string> _htmlStore = new();
 
-            for (const el of elements) {
-                if (!el) continue;
+    private PlaywrightRenderer(IPlaywright playwright, IBrowser browser, WebApplication app, HttpClient httpClient)
+    {
+        _playwright = playwright;
+        _browser    = browser;
+        _app        = app;
+        _httpClient = httpClient;
+    }
 
-                const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden') continue;
+    // -------------------------------------------------------------------------
+    // Factory — call once at startup, inject as singleton
+    // -------------------------------------------------------------------------
+    public static async Task<PlaywrightRenderer> CreateAsync(string assetBaseUrl, ILoggerFactory? loggerFactory = null)
+    {
+        // 1. Kestrel — single instance, serves HTML blobs + proxies assets
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.WebHost.UseUrls($"http://localhost:{LocalPort}");
+        if (loggerFactory is not null)
+            builder.Logging.AddProvider(new ForwardingLoggerProvider(loggerFactory));
+        else
+            builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
-                const rect = el.getBoundingClientRect();
-                if (!rect || rect.height === 0 || rect.width === 0) continue;
+        var httpClient = new HttpClient(new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+            MaxConnectionsPerServer  = 50
+        })
+        {
+            BaseAddress = new Uri(assetBaseUrl.TrimEnd('/') + "/"),
+            Timeout     = TimeSpan.FromSeconds(10)
+        };
 
-                const top = rect.top + window.scrollY;
-                const bottom = rect.bottom + window.scrollY;
+        var app = builder.Build();
 
-                if (top < idealBreak && bottom > idealBreak) {
-                    if (top > currentY + 100) {
-                        safeBreak = Math.floor(top - 2);
-                        break;
+        // Serve queued HTML by render ID
+        app.MapGet("/render/{id}", (string id, ConcurrentDictionary<string, string> store)
+            => store.TryGetValue(id, out var html)
+                ? Results.Content(html, "text/html")
+                : Results.NotFound())
+            .WithMetadata(new HtmlStoreMetadata());  // see wiring below
+
+        // Proxy everything else to the live site so scripts/CSS resolve
+        app.MapGet("/{**path}", async (string path, HttpContext ctx) =>
+        {
+            try
+            {
+                var response = await httpClient.GetAsync(path, ctx.RequestAborted);
+                var bytes    = await response.Content.ReadAsByteArrayAsync(ctx.RequestAborted);
+                var ct       = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
+                return Results.Bytes(bytes, ct);
+            }
+            catch
+            {
+                return Results.StatusCode(502);
+            }
+        });
+
+        // Wire the store into the /render route (minimal API can't close over fields cleanly)
+        // Instead we store it on app services via a thin wrapper
+        await app.StartAsync();
+
+        // 2. Playwright — single browser, reused across all renders
+        var playwright = await Playwright.CreateAsync();
+        var browser    = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        {
+            Headless = true,
+            Args     = new[]
+            {
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--headless=new",
+                "--disable-web-security"
+            }
+        });
+
+        return new PlaywrightRenderer(playwright, browser, app, httpClient);
+    }
+
+    // -------------------------------------------------------------------------
+    // Render — safe to call concurrently
+    // -------------------------------------------------------------------------
+    public async IAsyncEnumerable<byte[]> RenderAsync(string htmlContent, string baseUrl)
+    {
+        var id = Guid.NewGuid().ToString("N");
+        _htmlStore[id] = htmlContent;
+
+        var page = await _browser.NewPageAsync();
+
+        try
+        {
+            await page.SetViewportSizeAsync(PageWidth, 800);
+
+            await page.GotoAsync(
+                $"http://localhost:{LocalPort}/render/{id}",
+                new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+
+            await page.EvaluateAsync("() => document.fonts?.ready");
+
+            // Blur focus only — no DOM mutation
+            await page.EvaluateAsync(@"() => {
+                if (document.activeElement?.blur) document.activeElement.blur();
+            }");
+
+            // Read-only breakpoint raycaster
+            var jsResult = await page.EvaluateAsync<JsonElement>(@"(targetH) => {
+                try {
+                    const result = [0];
+                    let currentY = 0;
+                    const totalH = document.documentElement.scrollHeight;
+
+                    while (currentY + targetH < totalH) {
+                        let idealBreak = currentY + targetH;
+                        let safeBreak  = idealBreak;
+
+                        const elements = document.querySelectorAll(
+                            'p, input, select, label, img, tr, h1, h2, h3, h4, h5, span, div'
+                        );
+
+                        for (const el of elements) {
+                            if (!el) continue;
+                            const style = window.getComputedStyle(el);
+                            if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+                            const rect = el.getBoundingClientRect();
+                            if (!rect || rect.height === 0 || rect.width === 0) continue;
+
+                            const top    = rect.top    + window.scrollY;
+                            const bottom = rect.bottom + window.scrollY;
+
+                            if (top < idealBreak && bottom > idealBreak && top > currentY + 100) {
+                                safeBreak = Math.floor(top - 2);
+                                break;
+                            }
+                        }
+
+                        if (safeBreak <= currentY) safeBreak = currentY + targetH;
+                        result.push(safeBreak);
+                        currentY = safeBreak;
                     }
+
+                    result.push(totalH);
+                    return { ok: true, breakPoints: result };
+                } catch (e) {
+                    return { ok: false, error: e.message, stack: e.stack };
                 }
+            }", PageHeight);
+
+            List<int> breakPoints;
+
+            if (!jsResult.GetProperty("ok").GetBoolean())
+            {
+                var err = jsResult.GetProperty("error").GetString();
+                var stk = jsResult.GetProperty("stack").GetString();
+                throw new InvalidOperationException($"Breakpoint JS failed: {err}\n{stk}");
             }
 
-            if (safeBreak <= currentY) safeBreak = currentY + targetH;
-            result.push(safeBreak);
-            currentY = safeBreak;
+            breakPoints = jsResult.GetProperty("breakPoints")
+                .EnumerateArray()
+                .Select(x => x.GetInt32())
+                .ToList();
+
+            // Single full-page screenshot — slice in C#
+            var masterBytes = await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
+
+            using var masterImage = Image.Load<Rgba32>(masterBytes);
+
+            for (int i = 0; i < breakPoints.Count - 1; i++)
+            {
+                int yStart      = Math.Clamp(breakPoints[i],     0, masterImage.Height);
+                int yEnd        = Math.Clamp(breakPoints[i + 1], 0, masterImage.Height);
+                int sliceHeight = yEnd - yStart;
+
+                if (sliceHeight <= 0) continue;
+
+                using var slice  = masterImage.Clone(ctx => ctx.Crop(new Rectangle(0, yStart, masterImage.Width, sliceHeight)));
+                using var canvas = new Image<Rgba32>(PageWidth, PageHeight);
+
+                canvas.Mutate(ctx =>
+                {
+                    ctx.BackgroundColor(Color.White);
+                    ctx.DrawImage(slice, new Point(0, 0), 1f);
+                });
+
+                using var ms = new MemoryStream();
+                await canvas.SaveAsPngAsync(ms);
+                yield return ms.ToArray();
+            }
         }
-
-        result.push(totalH);
-        return { ok: true, breakPoints: result };
-
-    } catch (e) {
-        return {
-            ok: false,
-            error: e.message,
-            stack: e.stack,
-            // Dump useful DOM state at time of failure
-            scrollHeight: document.documentElement?.scrollHeight,
-            elementCount: document.querySelectorAll('p, input, select, label, img, tr, h1, h2, h3, span, div')?.length
-        };
+        finally
+        {
+            _htmlStore.TryRemove(id, out _);
+            await page.CloseAsync();
+        }
     }
-}", targetHeight);
 
-if (!result.GetProperty("ok").GetBoolean())
-{
-    var error = result.GetProperty("error").GetString();
-    var stack = result.GetProperty("stack").GetString();
-    throw new InvalidOperationException($"JS breakpoint calculation failed:\n{error}\n{stack}");
+    // -------------------------------------------------------------------------
+    // Disposal
+    // -------------------------------------------------------------------------
+    public async ValueTask DisposeAsync()
+    {
+        await _browser.DisposeAsync();
+        _playwright.Dispose();
+        await _app.StopAsync();
+        await _app.DisposeAsync();
+        _httpClient.Dispose();
+    }
 }
-
-var breakPoints = result.GetProperty("breakPoints")
-    .EnumerateArray()
-    .Select(x => x.GetInt32())
-    .ToList();
