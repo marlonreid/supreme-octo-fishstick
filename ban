@@ -1,123 +1,63 @@
-public async IAsyncEnumerable<byte[]> HtmlToPagedImagesAsync(string htmlContent, string baseUrl)
-{
-    var page = await _browser.NewPageAsync();
+var result = await page.EvaluateAsync<JsonElement>(@"(targetH) => {
+    try {
+        const result = [0];
+        let currentY = 0;
+        const totalH = document.documentElement.scrollHeight;
 
-    try
-    {
-        int pageWidth = 794;
-        int targetHeight = 1123;
-        await page.SetViewportSizeAsync(pageWidth, 800);
+        while (currentY + targetH < totalH) {
+            let idealBreak = currentY + targetH;
+            let safeBreak = idealBreak;
 
-        string fixedHtml = $"<base href='{baseUrl}'>\n" + htmlContent;
-        await page.SetContentAsync(fixedHtml, new PageSetContentOptions { WaitUntil = WaitUntilState.NetworkIdle });
-        await page.EvaluateAsync("() => document.fonts?.ready");
+            const elements = document.querySelectorAll('p, input, select, label, img, tr, h1, h2, h3, span, div');
 
-        await page.EvaluateAsync(@"() => {
-            document.querySelectorAll('select').forEach(s => {
-                if (!s || !s.options) return;
-                const hasSelected = Array.from(s.options).some(o => o.hasAttribute('selected'));
-                if (!hasSelected) s.selectedIndex = -1;
-            });
-            document.querySelectorAll('input[type=""radio""], input[type=""checkbox""]').forEach(i => {
-                if (i) i.checked = i.hasAttribute('checked');
-            });
-            if (document.activeElement && typeof document.activeElement.blur === 'function') {
-                document.activeElement.blur();
-            }
-        }");
+            for (const el of elements) {
+                if (!el) continue;
 
-        // FIX 1: offsetParent === null incorrectly skips body-level elements.
-        // Use getComputedStyle visibility check instead — it correctly identifies
-        // genuinely hidden elements regardless of DOM position.
-        var breakPoints = await page.EvaluateAsync<List<int>>(@"(targetH) => {
-            const result = [0];
-            let currentY = 0;
-            const totalH = document.documentElement.scrollHeight;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
 
-            while (currentY + targetH < totalH) {
-                let idealBreak = currentY + targetH;
-                let safeBreak = idealBreak;
+                const rect = el.getBoundingClientRect();
+                if (!rect || rect.height === 0 || rect.width === 0) continue;
 
-                const elements = document.querySelectorAll('p, input, select, label, img, tr, h1, h2, h3, span, div');
+                const top = rect.top + window.scrollY;
+                const bottom = rect.bottom + window.scrollY;
 
-                for (const el of elements) {
-                    if (!el) continue;
-
-                    // FIXED: offsetParent check was wrongly skipping top-level elements.
-                    // Check computed visibility instead.
-                    const style = window.getComputedStyle(el);
-                    if (style.display === 'none' || style.visibility === 'hidden') continue;
-
-                    const rect = el.getBoundingClientRect();
-                    if (!rect || rect.height === 0 || rect.width === 0) continue;
-
-                    const top = rect.top + window.scrollY;
-                    const bottom = rect.bottom + window.scrollY;
-
-                    if (top < idealBreak && bottom > idealBreak) {
-                        if (top > currentY + 100) {
-                            safeBreak = Math.floor(top - 2);
-                            break;
-                        }
+                if (top < idealBreak && bottom > idealBreak) {
+                    if (top > currentY + 100) {
+                        safeBreak = Math.floor(top - 2);
+                        break;
                     }
                 }
-
-                if (safeBreak <= currentY) safeBreak = currentY + targetH;
-
-                result.push(safeBreak);
-                currentY = safeBreak;
             }
 
-            result.push(totalH);
-            return result;
-        }", targetHeight);
-
-        // FIX 2: EvaluateAsync<List<int>> returns null if JS yields undefined/null.
-        // Fall back to simple uniform paging rather than blowing up.
-        byte[] masterBytes = await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
-        using var masterImage = Image.Load<Rgba32>(masterBytes);
-
-        if (breakPoints == null || breakPoints.Count < 2)
-        {
-            breakPoints = new List<int>();
-            int y = 0;
-            while (y < masterImage.Height)
-            {
-                breakPoints.Add(y);
-                y += targetHeight;
-            }
-            breakPoints.Add(masterImage.Height);
+            if (safeBreak <= currentY) safeBreak = currentY + targetH;
+            result.push(safeBreak);
+            currentY = safeBreak;
         }
 
-        for (int i = 0; i < breakPoints.Count - 1; i++)
-        {
-            int yStart = breakPoints[i];
-            int yEnd = breakPoints[i + 1];
+        result.push(totalH);
+        return { ok: true, breakPoints: result };
 
-            // FIX 3: Clamp to actual image bounds — the final breakpoint can
-            // exceed masterImage.Height if scrollHeight != rendered pixel height.
-            yStart = Math.Clamp(yStart, 0, masterImage.Height);
-            yEnd = Math.Clamp(yEnd, 0, masterImage.Height);
-            int sliceHeight = yEnd - yStart;
-
-            if (sliceHeight <= 0) continue;
-
-            var cropArea = new Rectangle(0, yStart, masterImage.Width, sliceHeight);
-
-            using var slice = masterImage.Clone(ctx => ctx.Crop(cropArea));
-            using var canvas = new Image<Rgba32>(pageWidth, targetHeight);
-            canvas.Mutate(ctx => {
-                ctx.BackgroundColor(Color.White);
-                ctx.DrawImage(slice, new Point(0, 0), 1f);
-            });
-
-            using var ms = new MemoryStream();
-            await canvas.SaveAsPngAsync(ms);
-            yield return ms.ToArray();
-        }
+    } catch (e) {
+        return {
+            ok: false,
+            error: e.message,
+            stack: e.stack,
+            // Dump useful DOM state at time of failure
+            scrollHeight: document.documentElement?.scrollHeight,
+            elementCount: document.querySelectorAll('p, input, select, label, img, tr, h1, h2, h3, span, div')?.length
+        };
     }
-    finally
-    {
-        await page.CloseAsync();
-    }
+}", targetHeight);
+
+if (!result.GetProperty("ok").GetBoolean())
+{
+    var error = result.GetProperty("error").GetString();
+    var stack = result.GetProperty("stack").GetString();
+    throw new InvalidOperationException($"JS breakpoint calculation failed:\n{error}\n{stack}");
 }
+
+var breakPoints = result.GetProperty("breakPoints")
+    .EnumerateArray()
+    .Select(x => x.GetInt32())
+    .ToList();
