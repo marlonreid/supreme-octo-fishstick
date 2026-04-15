@@ -1,0 +1,49 @@
+using System.DirectoryServices.Protocols;
+using UserSyncService.Sinks.ActiveDirectory;
+
+namespace UserSyncService.Sinks.ActiveDirectory.Commands;
+
+public class GetUserByUsernameCommand
+{
+    private readonly LdapConnection _connection;
+    private readonly ActiveDirectoryOptions _options;
+
+    public GetUserByUsernameCommand(
+        LdapConnection connection,
+        ActiveDirectoryOptions options)
+    {
+        _connection = connection;
+        _options = options;
+    }
+
+    public Task<SearchResultEntry?> ExecuteAsync(
+        string username,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() =>
+        {
+            var filter  = $"(&(objectClass=user)(sAMAccountName={EscapeLdapFilter(username)}))";
+            var request = new SearchRequest(
+                _options.BaseDn,
+                filter,
+                SearchScope.Subtree,
+                "sAMAccountName", "mail", "givenName", "sn", "distinguishedName"
+            );
+
+            var response = (SearchResponse)_connection.SendRequest(request);
+
+            return response.Entries.Count > 0
+                ? response.Entries[0]
+                : null;
+        }, cancellationToken);
+    }
+
+    // Prevents LDAP injection
+    private static string EscapeLdapFilter(string value) =>
+        value
+            .Replace("\\", "\\5c")
+            .Replace("*",  "\\2a")
+            .Replace("(",  "\\28")
+            .Replace(")",  "\\29")
+            .Replace("\0", "\\00");
+}
