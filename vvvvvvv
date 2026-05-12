@@ -1,20 +1,21 @@
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
-WORKDIR /src
+FROM mcr.microsoft.com/dotnet/sdk:10.0
+WORKDIR /app
+
 COPY ScreenshotService.csproj .
 RUN dotnet restore
 COPY . .
 RUN dotnet publish -c Release -o /app/publish --no-restore
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble AS final
-WORKDIR /app
-COPY --from=build /app/publish .
+WORKDIR /app/publish
 
-RUN apt-get update && apt-get install -y xvfb
+RUN dotnet tool install --global Microsoft.Playwright.CLI --version 1.59.0
+ENV PATH="$PATH:/root/.dotnet/tools"
+RUN playwright install --with-deps chromium
 
-# Installs chromium + all system dependencies in one shot
-RUN dotnet ScreenshotService.dll playwright install --with-deps chromium
+RUN apt-get install -y xvfb
 
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+RUN addgroup --system appgroup && \
+    adduser --system --ingroup appgroup appuser
 USER appuser
 
 CMD ["sh", "-c", "Xvfb :99 -screen 0 4096x1080x24 -ac & sleep 1 && DISPLAY=:99 dotnet ScreenshotService.dll"]
