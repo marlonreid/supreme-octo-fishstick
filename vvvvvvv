@@ -1,0 +1,20 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY ScreenshotService.csproj .
+RUN dotnet restore
+COPY . .
+RUN dotnet publish -c Release -o /app/publish --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble AS final
+WORKDIR /app
+COPY --from=build /app/publish .
+
+RUN apt-get update && apt-get install -y xvfb
+
+# Installs chromium + all system dependencies in one shot
+RUN dotnet ScreenshotService.dll playwright install --with-deps chromium
+
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+USER appuser
+
+CMD ["sh", "-c", "Xvfb :99 -screen 0 4096x1080x24 -ac & sleep 1 && DISPLAY=:99 dotnet ScreenshotService.dll"]
