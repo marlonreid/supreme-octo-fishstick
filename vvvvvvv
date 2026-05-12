@@ -1,21 +1,14 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0
-WORKDIR /app
-
+WORKDIR /src
 COPY ScreenshotService.csproj .
 RUN dotnet restore
 COPY . .
-RUN dotnet publish -c Release -o /app/publish --no-restore
-
-WORKDIR /app/publish
 
 RUN dotnet tool install --global Microsoft.Playwright.CLI --version 1.59.0
 ENV PATH="$PATH:/root/.dotnet/tools"
-RUN playwright install --with-deps chromium
+RUN playwright install --with-deps firefox
 
-RUN apt-get install -y xvfb
+RUN dotnet publish -c Release -o /app/publish --no-restore
 
-RUN addgroup --system appgroup && \
-    adduser --system --ingroup appgroup appuser
-USER appuser
-
-CMD ["sh", "-c", "Xvfb :99 -screen 0 4096x1080x24 -ac & sleep 1 && DISPLAY=:99 dotnet ScreenshotService.dll"]
+WORKDIR /app/publish
+ENTRYPOINT ["dotnet", "ScreenshotService.dll"]
