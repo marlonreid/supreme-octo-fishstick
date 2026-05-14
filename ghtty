@@ -1,0 +1,44 @@
+await page.AddInitScriptAsync(@"
+    window.__amLoadLastFired = Date.now();
+    window.__amLoadCount = 0;
+
+    // Intercept $ the moment jQuery sets itself on window
+    let _jq = null;
+    Object.defineProperty(window, '$', {
+        configurable: true,
+        enumerable: true,
+        get: () => _jq,
+        set: (jq) => {
+            _jq = jq;
+
+            // Wrap jQuery's internal trigger to catch ALL jQuery events
+            const origTrigger = jq.event.trigger;
+            jq.event.trigger = function(event, ...args) {
+                const eventName = typeof event === 'string' ? event : event?.type;
+                if (eventName === 'am-load-complete') {
+                    window.__amLoadLastFired = Date.now();
+                    window.__amLoadCount++;
+                }
+                return origTrigger.apply(this, [event, ...args]);
+            };
+        }
+    });
+");
+
+await page.GotoAsync(url);
+
+await page.WaitForFunctionAsync(
+    @"() => {
+        const idle = Date.now() - window.__amLoadLastFired;
+        return (window.__amLoadCount > 0 && idle >= 1000)
+            || (window.__amLoadCount === 0 && idle >= 2000);
+    }",
+    null,
+    new PageWaitForFunctionOptions
+    {
+        Timeout = 30_000,
+        PollingInterval = 100
+    }
+);
+
+await page.ScreenshotAsync(new PageScreenshotOptions { Path = "output.png" });
