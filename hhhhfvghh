@@ -1,0 +1,33 @@
+await page.WaitForSelectorAsync("body.am-load-complete", 
+    new PageWaitForSelectorOptions { State = WaitForSelectorState.Attached });
+
+var hasCIde = await page.QuerySelectorAsync(".c-ide") != null;
+var hasMultilayeredMaps = await page.QuerySelectorAsync(".multilayerd-maps") != null;
+
+int expectedTimeouts = (hasCIde ? 1 : 0) + (hasMultilayeredMaps ? 1 : 0);
+
+if (expectedTimeouts > 0)
+{
+    await page.EvaluateAsync($"window.__expectedTimeouts = {expectedTimeouts};");
+    
+    await page.AddScriptTagAsync(new PageAddScriptTagOptions
+    {
+        Content = @"
+            window.__drainedTimeouts = 0;
+            const _orig = window.setTimeout;
+            window.setTimeout = function(fn, delay, ...args) {
+                return _orig(function() {
+                    try { fn(...args); }
+                    finally {
+                        window.__drainedTimeouts++;
+                    }
+                }, delay);
+            };
+        "
+    });
+
+    await page.WaitForFunctionAsync(
+        "() => window.__drainedTimeouts >= window.__expectedTimeouts");
+}
+
+await page.ScreenshotAsync(...);
