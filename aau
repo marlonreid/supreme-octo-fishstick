@@ -1,4 +1,11 @@
-using System;
+
+
+var modified = Regex.Replace(
+    html,
+    @"<script[^>]*>(?:(?!</script>)[\s\S])*?\$\(Sonet\)\.on\('am-load-complete'[\s\S]*?</script>",
+    script,
+    RegexOptions.Singleline
+);using System;
 using System.Collections.Generic;
 using System.Data;
 using System.IO;
