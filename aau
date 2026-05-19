@@ -1,22 +1,29 @@
-const insertedPre = document.querySelector('pre.ide-content-section:not([data-required-width])');
-const style = window.getComputedStyle(insertedPre);
+var debug = await page.EvaluateAsync<object>(@"() => {
+    const insertedPre = document.querySelector('pre.ide-content-section');
+    const preRect = insertedPre.getBoundingClientRect();
+    const style = window.getComputedStyle(insertedPre);
+    
+    const ancestors = [];
+    let el = insertedPre.parentElement;
+    while (el && el !== document.body) {
+        const s = window.getComputedStyle(el);
+        ancestors.push({
+            class: el.className,
+            paddingLeft: s.paddingLeft,
+            paddingRight: s.paddingRight,
+            marginRight: s.marginRight
+        });
+        el = el.parentElement;
+    }
 
-const span = document.createElement('span');
-span.style.cssText = 'position:absolute; top:-9999px; left:0; visibility:hidden; white-space:pre;';
-span.style.font = style.font;
-span.style.letterSpacing = style.letterSpacing;
-span.style.tabSize = style.tabSize;
-document.body.appendChild(span);
+    return {
+        preLeft: preRect.left,
+        paddingLeft: style.paddingLeft,
+        paddingRight: style.paddingRight,
+        borderRight: style.borderRightWidth,
+        marginRight: style.marginRight,
+        ancestors
+    };
+}");
 
-const lines = insertedPre.textContent.split('\n');
-let maxWidth = 0;
-lines.forEach(line => {
-    span.textContent = line;
-    maxWidth = Math.max(maxWidth, span.getBoundingClientRect().width);
-});
-
-document.body.removeChild(span);
-
-const preLeft = insertedPre.getBoundingClientRect().left;
-const requiredWidth = Math.ceil(preLeft + maxWidth);
-insertedPre.setAttribute('data-required-width', requiredWidth);
+Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(debug));
