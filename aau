@@ -1,21 +1,22 @@
-() => {
-    let max = 0;
-    document.querySelectorAll('pre').forEach(el => {
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        const textRight = range.getBoundingClientRect().right;
-        
-        let rightSpacing = 0;
-        let current = el;
-        while (current && current !== document.body) {
-            const style = window.getComputedStyle(current);
-            rightSpacing += parseFloat(style.paddingRight) || 0;
-            rightSpacing += parseFloat(style.borderRightWidth) || 0;
-            rightSpacing += parseFloat(style.marginRight) || 0;
-            current = current.parentElement;
-        }
-        
-        max = Math.max(max, textRight + rightSpacing);
-    });
-    return Math.ceil(max);
-}
+const insertedPre = document.querySelector('pre.ide-content-section:not([data-required-width])');
+const style = window.getComputedStyle(insertedPre);
+
+const span = document.createElement('span');
+span.style.cssText = 'position:absolute; top:-9999px; left:0; visibility:hidden; white-space:pre;';
+span.style.font = style.font;
+span.style.letterSpacing = style.letterSpacing;
+span.style.tabSize = style.tabSize;
+document.body.appendChild(span);
+
+const lines = insertedPre.textContent.split('\n');
+let maxWidth = 0;
+lines.forEach(line => {
+    span.textContent = line;
+    maxWidth = Math.max(maxWidth, span.getBoundingClientRect().width);
+});
+
+document.body.removeChild(span);
+
+const preLeft = insertedPre.getBoundingClientRect().left;
+const requiredWidth = Math.ceil(preLeft + maxWidth);
+insertedPre.setAttribute('data-required-width', requiredWidth);
