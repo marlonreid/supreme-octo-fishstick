@@ -1,11 +1,7 @@
-const style = window.getComputedStyle(insertedPre);
-
-const span = document.createElement('span');
-span.style.cssText = 'position:absolute; top:-9999px; left:0; visibility:hidden; white-space:pre;';
-span.style.fontFamily = style.fontFamily;
-span.style.fontSize = style.fontSize;
-span.style.fontWeight = style.fontWeight;
-span.style.fontStyle = style.fontStyle;
-span.style.letterSpacing = style.letterSpacing;
-span.style.tabSize = style.tabSize;
-document.body.appendChild(span);
+var cIdeCount = await page.EvaluateAsync<int>(@"() =>
+    Array.from(document.querySelectorAll('.c-ide'))
+         .filter(el => {
+             const style = window.getComputedStyle(el);
+             return style.display !== 'none' && style.visibility !== 'hidden';
+         }).length
+");
